@@ -3,6 +3,9 @@
 .more-title { margin: 0; font: 44px/1 var(--logo); color: #fff; }
 .more-subtitle { margin: 10px 0 0; color: var(--text-2); }
 .more-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.archive-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(210px, 270px); align-items: center; gap: 12px; margin: 0 0 20px; }
+.archive-sort-label { display: flex; align-items: center; gap: 9px; color: var(--text-2); font-size: 12px; white-space: nowrap; }
+.archive-sort { min-width: 0; padding: 8px 10px; }
 .more-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 245px), 1fr)); gap: 18px; }
 .more-card-shell { position: relative; min-width: 0; aspect-ratio: 4 / 3; border: 1px solid var(--line-2); border-radius: 20px; overflow: hidden; background: radial-gradient(circle at 20% 10%, #333, #141414 70%); box-shadow: 0 12px 36px #0008; }
 .more-card-open { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; text-align: left; color: #fff; }
@@ -41,6 +44,9 @@
   .more-heading { align-items: flex-start; flex-direction: column; margin-bottom: 20px; }
   .more-actions { justify-content: flex-start; }
   .more-title { font-size: 38px; }
+  .archive-controls { grid-template-columns: 1fr; gap: 9px; margin-bottom: 16px; }
+  .archive-sort-label { justify-content: space-between; }
+  .archive-sort { flex: 1; }
   .more-grid { gap: 12px; }
   .more-viewer { padding: 0; }
   .more-viewer-panel { width: 100vw; height: 100dvh; border-radius: 0; border: 0; }

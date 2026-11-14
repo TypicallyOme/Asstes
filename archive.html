@@ -29,6 +29,16 @@
         <button class="btn sm primary" id="addMoreCard" type="button">Create box</button>
       </div>
     </div>
+    <div class="archive-controls">
+      <input class="input archive-search" id="archiveSearch" type="search" placeholder="Search boxes by name, text, or link" aria-label="Search Archive boxes" autocomplete="off">
+      <label class="archive-sort-label" for="archiveSort">Sort by
+        <select class="input archive-sort" id="archiveSort">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="name">Name (A–Z)</option>
+        </select>
+      </label>
+    </div>
     <section class="more-grid" id="moreGrid" aria-live="polite"></section>
     <div class="more-empty hidden" id="moreEmpty">No boxes yet.</div>
   </main>

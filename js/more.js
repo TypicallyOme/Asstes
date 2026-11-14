@@ -7,6 +7,8 @@
 
   const grid = O.$('#moreGrid');
   const empty = O.$('#moreEmpty');
+  const searchInput = O.$('#archiveSearch');
+  const sortSelect = O.$('#archiveSort');
   const addBtn = O.$('#addMoreCard');
   const viewer = O.$('#moreViewer');
   const viewerPanel = O.$('#moreViewerPanel');
@@ -19,6 +21,8 @@
   const imageCache = new Map();
 
   addBtn.onclick = () => openCardEditor();
+  searchInput.addEventListener('input', renderCards);
+  sortSelect.addEventListener('change', renderCards);
   viewerClose.innerHTML = I.x;
   viewerClose.onclick = closeViewer;
   O.$('#moreRefresh').onclick = refreshViewer;
@@ -82,8 +86,17 @@
   function renderCards() {
     if (!grid) return;
     grid.innerHTML = '';
+    const query = searchInput.value.trim().toLocaleLowerCase();
+    const sortBy = sortSelect.value || 'newest';
     const items = Object.entries(cards).filter(([, card]) => card && typeof card === 'object')
-      .sort((a, b) => (Number(a[1].order) || 0) - (Number(b[1].order) || 0));
+      .filter(([, card]) => !query || [card.title, card.text, card.url].some(value => String(value || '').toLocaleLowerCase().includes(query)));
+    const created = card => Number(card.createdAt) || Number(card.order) || 0;
+    items.sort((a, b) => {
+      if (sortBy === 'name') return String(a[1].title || '').localeCompare(String(b[1].title || ''), undefined, { sensitivity: 'base' });
+      const delta = created(a[1]) - created(b[1]);
+      return sortBy === 'oldest' ? delta : -delta;
+    });
+    empty.textContent = query ? 'No boxes match your search.' : 'No boxes yet.';
     empty.classList.toggle('hidden', items.length > 0);
     items.forEach(([id, card]) => {
       const shell = el('article', { class: 'more-card-shell no-image' });
