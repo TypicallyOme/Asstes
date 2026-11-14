@@ -118,3 +118,7 @@ mark { background: #ffffff2e; color: #fff; border-radius: 3px; padding: 0 1px; }
   .gutter { width: 34px; }
   .msg { gap: 10px; padding: 6px 6px; }
 }
+
+.forward-card, .forward-preview { margin-top: 8px; max-width: 460px; padding: 10px 12px; border: 1px solid var(--line-2); border-left: 3px solid var(--text-2); border-radius: 12px; background: var(--bg-2); overflow-wrap: anywhere; }
+.forward-card .forward-label, .forward-preview .forward-label { margin-bottom: 6px; color: var(--muted); font-size: 12px; }
+.forward-card .share-card { margin-top: 8px; }

@@ -12,6 +12,13 @@
     "names":    { ".read": true, ".write": true },
     "roles":    { ".read": true, ".write": true },
     "owners":   { ".read": true, ".write": true },
+    "customTags": { ".read": true, ".write": true },
+    "userTags": { ".read": true, ".write": true },
+    "announcement": { ".read": true, ".write": true },
+    "moreCards": { ".read": true, ".write": true },
+    "communities": { ".read": true, ".write": true },
+    "communityMsgs": { ".read": true, ".write": true },
+    "communityTyping": { ".read": true, ".write": true },
     "mod":      { ".read": true, ".write": true },
     "presence": { ".read": true, "$uid": { ".write": true } },
     "typing":   { ".read": true, "$uid": { ".write": true } },
@@ -28,7 +35,10 @@
       ".indexOn": ["ts"],
       "$id": {
         ".write": true,
-        "text": { ".validate": "newData.isString() && newData.val().length <= 5000" }
+        "text": { ".validate": "newData.isString() && newData.val().length <= 5000" },
+        "embed": {
+          ".validate": "!newData.exists() || (newData.child('type').val() == 'url' && newData.child('url').isString() && newData.child('url').val().length <= 2048) || (newData.child('type').val() == 'html' && newData.child('html').isString() && newData.child('html').val().length <= 20000)"
+        }
       }
     },
     "comments": {

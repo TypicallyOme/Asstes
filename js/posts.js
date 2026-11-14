@@ -13,9 +13,13 @@
   // ---------- composer ----------
   const ntText = O.$('#ntText'), ntPost = O.$('#ntPost'), ntAttach = O.$('#ntAttach'), ntEmoji = O.$('#ntEmoji');
   const ntTitle = O.$('#ntTitle');
+  const ntEmbedEditor = O.$('#ntEmbedEditor'), ntEmbedUrlPane = O.$('#ntEmbedUrlPane'), ntEmbedHtmlPane = O.$('#ntEmbedHtmlPane');
+  const ntEmbedUrl = O.$('#ntEmbedUrl'), ntEmbedHtml = O.$('#ntEmbedHtml');
+  const ntEmbedUrlBtn = O.$('#ntEmbedUrlBtn'), ntEmbedHtmlBtn = O.$('#ntEmbedHtmlBtn'), ntEmbedClear = O.$('#ntEmbedClear');
   const ntFile = O.$('#ntFile'), ntPending = O.$('#ntPending'), ntCount = O.$('#ntCount'), ntBlocked = O.$('#ntBlocked');
-  ntAttach.innerHTML = I.clip; ntEmoji.innerHTML = I.smile; ntFile.accept = O.ACCEPT;
+  ntAttach.innerHTML = I.clip; ntEmoji.innerHTML = I.smile; ntEmbedUrlBtn.innerHTML = I.share; ntEmbedHtmlBtn.innerHTML = I.edit; ntFile.accept = O.ACCEPT;
   let pending = [];
+  let embedMode = null;
 
   function paintComposer() {
     const a = O.$('#ntAvatar'); a.innerHTML = '';
@@ -28,6 +32,8 @@
     ntBlocked.classList.toggle('hidden', !blocked);
     if (blocked) ntBlocked.textContent = O.isBanned() ? 'You are banned.' : 'You are timed out — you can post again in ' + O.fmtDur(left) + '.';
     ntText.disabled = blocked; ntTitle.disabled = blocked; ntAttach.disabled = blocked; ntEmoji.disabled = blocked;
+    ntEmbedUrlBtn.disabled = blocked; ntEmbedHtmlBtn.disabled = blocked; ntEmbedClear.disabled = blocked;
+    ntEmbedUrl.disabled = blocked; ntEmbedHtml.disabled = blocked;
     updatePostBtn();
   }
   O.on('change', paintComposer);
@@ -36,11 +42,28 @@
   function autosize(t) { t.style.height = 'auto'; t.style.height = Math.min(320, t.scrollHeight) + 'px'; }
   function updatePostBtn() {
     const uploading = pending.some(p => p.status === 'uploading');
-    const has = ntText.value.trim() || pending.some(p => p.att);
+    const hasEmbed = (embedMode === 'url' && ntEmbedUrl.value.trim()) || (embedMode === 'html' && ntEmbedHtml.value.trim());
+    const has = ntText.value.trim() || pending.some(p => p.att) || hasEmbed;
     ntPost.disabled = uploading || !has || ntText.disabled;
     const len = ntText.value.length;
     ntCount.textContent = len > 4500 ? (5000 - len) : '';
   }
+  function setEmbedMode(mode) {
+    embedMode = mode;
+    ntEmbedEditor.classList.toggle('hidden', !mode);
+    ntEmbedUrlPane.classList.toggle('hidden', mode !== 'url');
+    ntEmbedHtmlPane.classList.toggle('hidden', mode !== 'html');
+    ntEmbedUrlBtn.classList.toggle('on', mode === 'url');
+    ntEmbedHtmlBtn.classList.toggle('on', mode === 'html');
+    ntEmbedClear.classList.toggle('hidden', !mode);
+    updatePostBtn();
+  }
+  ntEmbedUrlBtn.onclick = () => setEmbedMode(embedMode === 'url' ? null : 'url');
+  ntEmbedHtmlBtn.onclick = () => setEmbedMode(embedMode === 'html' ? null : 'html');
+  ntEmbedClear.onclick = () => { ntEmbedUrl.value = ''; ntEmbedHtml.value = ''; setEmbedMode(null); };
+  ntEmbedUrl.addEventListener('input', updatePostBtn);
+  ntEmbedHtml.addEventListener('input', updatePostBtn);
+
   ntText.addEventListener('input', () => { autosize(ntText); updatePostBtn(); });
   ntText.addEventListener('focus', () => { if (!O.me()) O.openProfile({ setup: true }); });
   ntTitle.addEventListener('focus', () => { if (!O.me()) O.openProfile({ setup: true }); });
@@ -95,18 +118,35 @@
     if (pending.some(p => p.status === 'uploading')) return O.toast('Wait for uploads to finish');
     const text = ntText.value.trim().slice(0, 5000);
     const atts = pending.filter(p => p.att).map(p => p.att);
-    if (!text && !atts.length) return;
+    let embed = null;
+    if (embedMode === 'url') {
+      try {
+        let raw = ntEmbedUrl.value.trim();
+        if (!raw) throw new Error('empty');
+        if (!/^[a-z][a-z0-9+.-]*:/i.test(raw) && !raw.startsWith('/') && !raw.startsWith('./') && !raw.startsWith('../')) raw = 'https://' + raw;
+        const url = new URL(raw, location.href);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid');
+        embed = { type: 'url', url: url.href };
+      } catch (e) { O.toast('Enter a valid http or https URL to embed', true); ntEmbedUrl.focus(); return; }
+    } else if (embedMode === 'html') {
+      const html = ntEmbedHtml.value.trim();
+      if (!html) { O.toast('Paste HTML code to embed', true); ntEmbedHtml.focus(); return; }
+      if (html.length > 20000) { O.toast('HTML embeds can be up to 20,000 characters', true); ntEmbedHtml.focus(); return; }
+      embed = { type: 'html', html };
+    }
+    if (!text && !atts.length && !embed) return;
     if (Date.now() - lastPost < 3000) return O.toast('Slow down a little');
     lastPost = Date.now();
     const title = ntTitle.value.trim().slice(0, 100);
     const post = { uid, text, ts: TS, commentCount: 0 };
     if (title) post.title = title;
     if (atts.length) post.attachments = atts;
+    if (embed) post.embed = embed;
     ntPost.disabled = true;
     try {
       await db.ref('posts').push(post);
       pending.forEach(p => URL.revokeObjectURL(p.preview));
-      ntText.value = ''; ntTitle.value = ''; pending = []; drawPending(); autosize(ntText);
+      ntText.value = ''; ntTitle.value = ''; ntEmbedUrl.value = ''; ntEmbedHtml.value = ''; setEmbedMode(null); pending = []; drawPending(); autosize(ntText);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (e) { O.toast('Could not post: ' + e.message, true); }
     updatePostBtn();
@@ -194,6 +234,7 @@
       main.append(t);
     }
     const atts = O.attachmentsEl(p.attachments); if (atts) main.append(atts);
+    const embed = postEmbed(p.embed); if (embed) main.append(embed);
     const r = O.reactionsEl(p.reactions, 'posts/' + id + '/reactions'); if (r) main.append(r);
 
     const reactBtn = el('button', { type: 'button', title: 'React', html: I.react });
@@ -208,6 +249,22 @@
     if (open.has(id)) main.append(commentsFor(id).el);
     node.append(left, main);
     return node;
+  }
+
+  function postEmbed(embed) {
+    if (!embed || typeof embed !== 'object') return null;
+    const frame = el('iframe', { title: 'Embedded post content', loading: 'lazy', allow: 'fullscreen; autoplay; encrypted-media', allowfullscreen: true, referrerpolicy: 'no-referrer' });
+    if (embed.type === 'url' && typeof embed.url === 'string') {
+      try {
+        const url = new URL(embed.url, location.href);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
+        frame.src = url.href;
+      } catch (e) { return null; }
+    } else if (embed.type === 'html' && typeof embed.html === 'string' && embed.html.length <= 20000) {
+      frame.setAttribute('sandbox', 'allow-scripts allow-forms');
+      frame.srcdoc = embed.html;
+    } else return null;
+    return el('div', { class: 'post-embed' }, frame);
   }
 
   // --- search ---

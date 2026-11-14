@@ -106,9 +106,9 @@
       let prev = null;
       ids.forEach(id => {
         const m = msgs.get(id);
-        const grouped = !!(prev && prev.uid === m.uid && !m.replyTo && !m.share && (m.ts - prev.ts) < 5 * 60e3);
+        const grouped = !!(prev && prev.uid === m.uid && !prev.forward && !m.replyTo && !m.share && !m.forward && (m.ts - prev.ts) < 5 * 60e3);
         const sig = JSON.stringify(m) + '§' + O.userSig(m.uid) + '§' + grouped + '§' + O.canModerate(m.uid) + '§' +
-          (m.replyTo ? O.userSig(m.replyTo.uid) : '') + '§' + (/@/.test(m.text || '') ? ns + (O.me() || {}).name : '');
+          (m.replyTo ? O.userSig(m.replyTo.uid) : '') + '§' + (m.forward ? O.userSig(m.forward.uid) : '') + '§' + (/@/.test(m.text || '') ? ns + (O.me() || {}).name : '');
         const cached = nodes.get(id);
         if (cached && cached.sig === sig) out.push(cached.node);
         else { const node = buildMsg(id, m, grouped); nodes.set(id, { node, sig }); out.push(node); }
@@ -154,8 +154,11 @@
         if (m.edited) t.append(el('span', { class: 'edited' }, m.editedBy && m.editedBy !== m.uid ? '(edited by mod)' : '(edited)'));
         body.append(t);
       }
-      const atts = O.attachmentsEl(m.attachments); if (atts) body.append(atts);
-      if (m.share && m.share.id) body.append(shareCard(m.share));
+      if (m.forward) body.append(forwardCard(m.forward));
+      else {
+        const atts = O.attachmentsEl(m.attachments); if (atts) body.append(atts);
+        if (m.share && m.share.id) body.append(shareCard(m.share));
+      }
       const rpath = msgPath + '/' + id + '/reactions';
       const r = O.reactionsEl(m.reactions, rpath); if (r) body.append(r);
 
@@ -163,6 +166,7 @@
       const act = (icon, title, fn, cls) => acts.append(el('button', { type: 'button', title, class: cls || '', html: icon, onclick: e => { e.stopPropagation(); fn(e); } }));
       act(I.react, 'React', e => O.openPicker(e.currentTarget, eid => O.toggleReaction(rpath, eid), { title: 'React' }));
       act(I.reply, 'Reply', () => setReply(id, m));
+      act(I.share, 'Forward to DM', () => forwardToDM(m));
       const own = m.uid === uid;
       const canMod = !own && O.canModerate(m.uid);
       if (own || canMod) {
@@ -185,13 +189,81 @@
     }
 
     function shareCard(sh) {
-      const card = el('a', { class: 'share-card', href: 'post.html#p=' + encodeURIComponent(sh.id) },
-        el('div', { class: 'sc-head', html: I.posts.replace('<svg', '<svg width="14" height="14"') + ' Post by ' }),
+      const archive = sh.type === 'archive';
+      const community = sh.type === 'community';
+      const href = community ? 'groups.html#community=' + encodeURIComponent(sh.id) : archive ? 'archive.html#box=' + encodeURIComponent(sh.id) : 'post.html#p=' + encodeURIComponent(sh.id);
+      const icon = community ? I.group : archive ? I.archive : I.posts;
+      const kind = community ? 'Community' : archive ? 'Archive box' : 'Post';
+      const copy = sh.text || (archive ? sh.url || '' : community ? 'Public Orbit community' : sh.title ? '' : sh.media ? '[' + sh.media + ']' : '');
+      const card = el('a', { class: 'share-card', href },
+        el('div', { class: 'sc-head', html: icon.replace('<svg', '<svg width="14" height="14"') + ' ' + kind + ' by ' }),
         sh.title ? el('div', { class: 'sc-title' }, sh.title) : null,
-        el('div', { class: 'sc-text' }, O.richEl(sh.text || (sh.title ? '' : sh.media ? '[' + sh.media + ']' : ''), 'span')),
-        el('div', { class: 'sc-open' }, 'Open post →'));
+        el('div', { class: 'sc-text' }, O.richEl(copy, 'span')),
+        el('div', { class: 'sc-open' }, community ? 'Open community →' : archive ? 'Open Archive box →' : 'Open post →'));
       card.querySelector('.sc-head').append(O.nameFrom(O.user(sh.uid) || { name: 'unknown' }));
       return card;
+    }
+
+    function forwardCard(forward) {
+      const box = el('div', { class: 'forward-card' },
+        el('div', { class: 'forward-label' }, 'Forwarded from ', O.nameTag(forward.uid || '')));
+      if (forward.text) box.append(O.richEl(forward.text));
+      const atts = O.attachmentsEl(forward.attachments); if (atts) box.append(atts);
+      if (forward.share && forward.share.id) box.append(shareCard(forward.share));
+      if (!forward.text && !atts && !forward.share) box.append(el('span', { class: 'muted' }, '[message]'));
+      return box;
+    }
+
+    function forwardToDM(message) {
+      if (!O.canAct()) return;
+      const note = el('textarea', { class: 'textarea', rows: 2, placeholder: 'Add a message (optional)', maxlength: 1000, style: 'min-height:60px' });
+      const original = message.forward || message;
+      const preview = el('div', { class: 'forward-preview' },
+        el('div', { class: 'forward-label' }, 'Forward from ', O.nameTag(original.uid || message.uid)),
+        original.text ? O.richEl(original.text) : null,
+        original.attachments ? el('div', { class: 'muted' }, 'Message includes attachments') : null,
+        original.share ? el('div', { class: 'muted' }, 'Message includes a shared item') : null);
+      const search = el('input', { class: 'input', placeholder: 'Search DMs or people' });
+      const listEl = el('div', { class: 'pick-list' });
+      const sendBtn = el('button', { class: 'btn primary' }, 'Forward');
+      let convs = [];
+      let dest = null;
+      const same = d => !!dest && d.type === dest.type && d.id === dest.id;
+      const draw = () => {
+        const q = search.value.trim().toLowerCase();
+        listEl.innerHTML = '';
+        const row = (d, avatar, label, sub) => listEl.append(el('button', { type: 'button', class: 'pick' + (same(d) ? ' on' : ''), onclick: () => { dest = d; draw(); } },
+          avatar, el('div', { class: 'grow' }, el('div', null, label), el('div', { class: 'muted', style: 'font-size:12px' }, sub)), el('span', { class: 'check round' })));
+        const dmWith = new Set();
+        convs.filter(([, meta]) => meta && meta.type === 'dm').forEach(([cid, meta]) => {
+          const other = O.dm.other(meta); dmWith.add(other);
+          const title = O.dm.title(meta);
+          if (!q || title.toLowerCase().includes(q)) row({ type: 'conv', id: cid }, O.avatar(other, 32, false), O.nameTag(other), 'DM');
+        });
+        Object.keys(O.S.users).filter(id => id !== uid && O.user(id) && !dmWith.has(id) && (!q || O.user(id).name.toLowerCase().includes(q)))
+          .sort((a, b) => O.user(a).name.localeCompare(O.user(b).name)).slice(0, 40)
+          .forEach(id => row({ type: 'person', id }, O.avatar(id, 32, false), O.nameTag(id), 'Start a DM'));
+        if (!listEl.children.length) listEl.append(el('div', { class: 'muted', style: 'padding:10px;font-size:13px' }, 'No DMs or people match'));
+      };
+      search.oninput = draw;
+      const modal = O.modal({ title: 'Forward message to a DM', body: el('div', null, preview, note, el('label', { class: 'label' }, 'Send to'), search, listEl), foot: [sendBtn] });
+      draw();
+      O.dm.listMine().then(list => { convs = list; draw(); }).catch(() => {});
+      sendBtn.onclick = async () => {
+        if (!O.canAct()) return;
+        if (!dest) return O.toast('Choose a DM first', true);
+        sendBtn.disabled = true;
+        const forwarded = { uid: original.uid || message.uid, text: String(original.text || '').slice(0, 4000), ts: Number(original.ts || message.ts) || O.TS };
+        if (original.attachments) forwarded.attachments = original.attachments;
+        if (original.share) forwarded.share = original.share;
+        const outgoing = { uid, text: note.value.trim().slice(0, 1000), ts: O.TS, forward: forwarded };
+        try {
+          const cid = dest.type === 'person' ? await O.dm.ensure(dest.id) : dest.id;
+          await O.dm.send(cid, outgoing);
+          modal.close();
+          O.toast('Message forwarded to ' + (dest.type === 'person' ? O.user(dest.id).name : O.dm.title(convs.find(c => c[0] === cid)?.[1])));
+        } catch (e) { sendBtn.disabled = false; O.toast(e.message || 'Could not forward message', true); }
+      };
     }
 
     function jumpTo(id) {
@@ -223,8 +295,9 @@
     const sTerms = q => q.toLowerCase().split(/\s+/).filter(Boolean);
     function msgMatches(m, ts) {
       const author = ((O.user(m.uid) || {}).name || '').toLowerCase();
-      const hay = ((m.text || '') + '\n' + (m.share ? (m.share.title || '') + ' ' + (m.share.text || '') : '') + '\n' +
-        (m.attachments ? Object.values(m.attachments).map(a => (a && a.name) || '').join(' ') : '')).toLowerCase();
+      const hay = ((m.text || '') + '\n' + (m.forward ? (m.forward.text || '') : '') + '\n' + (m.share ? (m.share.title || '') + ' ' + (m.share.text || '') : '') + '\n' +
+        (m.attachments ? Object.values(m.attachments).map(a => (a && a.name) || '').join(' ') : '') + '\n' +
+        (m.forward && m.forward.attachments ? Object.values(m.forward.attachments).map(a => (a && a.name) || '').join(' ') : '')).toLowerCase();
       return ts.every(t => (t.startsWith('@') && t.length > 1) ? author.startsWith(t.slice(1)) : (hay.includes(t) || author.includes(t)));
     }
     function markText(text, ts) {
@@ -258,7 +331,7 @@
         const hits = all.filter(([, m]) => m && msgMatches(m, ts)).reverse();
         info.textContent = hits.length ? hits.length + (hits.length === 1 ? ' result' : ' results') + (hits.length > 60 ? ' — showing newest 60' : '') : 'No messages match “' + q + '”';
         hits.slice(0, 60).forEach(([id, m]) => {
-          const txt = m.text || (m.share ? (m.share.title || m.share.text || '[shared post]') : m.attachments ? '[attachment] ' + Object.values(m.attachments).map(a => (a && a.name) || '').join(', ') : '');
+          const txt = m.text || (m.forward ? m.forward.text || '[forwarded message]' : m.share ? (m.share.title || m.share.text || '[shared post]') : m.attachments ? '[attachment] ' + Object.values(m.attachments).map(a => (a && a.name) || '').join(', ') : '');
           results.append(el('button', { type: 'button', class: 'sresult', onclick: () => { closeSearch(); goToMessage(id, all); } },
             O.avatar(m.uid, 32, false),
             el('div', { class: 'grow' },

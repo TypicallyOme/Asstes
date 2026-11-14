@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orbit · Groups</title>
+  <meta name="theme-color" content="#000000">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/orbit.css">
+  <link rel="stylesheet" href="css/convo.css">
+  <link rel="stylesheet" href="css/groups.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="logo" href="index.html">Orbit</a>
+    <span class="title">Groups</span>
+    <span class="spacer"></span>
+  </header>
+
+  <main class="groups-main">
+    <section class="groups-heading">
+      <div>
+        <h1 class="groups-title">Groups</h1>
+        <p class="groups-subtitle">Find a community or start one of your own.</p>
+      </div>
+      <button class="btn primary" id="addCommunity" type="button">Add Community</button>
+    </section>
+    <div class="groups-toolbar">
+      <div class="groups-tabs" role="tablist" aria-label="Community lists">
+        <button class="groups-tab active" type="button" data-mode="discover" role="tab" aria-selected="true">Discover</button>
+        <button class="groups-tab" type="button" data-mode="joined" role="tab" aria-selected="false" id="joinedTab">Your communities</button>
+      </div>
+      <input class="input groups-search" id="communitySearch" type="search" placeholder="Search communities" autocomplete="off">
+    </div>
+    <section class="community-grid" id="communityGrid" aria-live="polite"></section>
+    <div class="groups-empty hidden" id="communityEmpty"></div>
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
+  <script src="js/orbit.js"></script>
+  <script src="js/convo.js"></script>
+  <script src="js/groups.js"></script>
+</body>
+</html>

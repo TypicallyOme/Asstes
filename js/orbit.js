@@ -111,6 +111,7 @@
     chat: svg('<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>'),
     posts: svg('<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8 9h8M8 13h8M8 17h5"/>'),
     more: svg('<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>'),
+    archive: svg('<path d="M3 5h18v4H3z"/><path d="M5 9v10h14V9"/><path d="M9 13h6"/>'),
     home: svg('<path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/>'),
     users: svg('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M21.5 20a6.5 6.5 0 0 0-4-6"/>'),
     user: svg('<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>'),
@@ -146,7 +147,7 @@
   if (!uid || !/^[A-Za-z0-9_-]{8,40}$/.test(uid)) { uid = db.ref().push().key; ls.set('orbit_uid', uid); }
 
   // ---------- live state ----------
-  const S = { users: {}, roles: {}, owners: {}, mod: {}, presence: {}, byName: {}, loaded: {} };
+  const S = { users: {}, roles: {}, owners: {}, mod: {}, presence: {}, customTags: {}, userTags: {}, announcement: null, byName: {}, loaded: {} };
   let readyResolve;
   const ready = new Promise(r => { readyResolve = r; });
   let changeQueued = false;
@@ -155,15 +156,18 @@
     changeQueued = true;
     requestAnimationFrame(() => { changeQueued = false; emit('change'); selfCheck(); });
   }
-  ['users', 'roles', 'owners', 'mod', 'presence'].forEach(key => {
+  ['users', 'roles', 'owners', 'mod', 'presence', 'customTags', 'userTags', 'announcement'].forEach(key => {
     db.ref(key).on('value', snap => {
-      S[key] = snap.val() || {};
+      S[key] = key === 'announcement' ? snap.val() : (snap.val() || {});
       if (key === 'users') {
         S.byName = {};
         for (const id in S.users) { const u = S.users[id]; if (u && u.name) S.byName[u.name.toLowerCase()] = id; }
       }
       S.loaded[key] = true;
       if (['users', 'roles', 'owners', 'mod'].every(k => S.loaded[k])) readyResolve();
+      if (key === 'customTags') emit('customTags', S.customTags);
+      if (key === 'announcement') { emit('announcement', S.announcement); renderAnnouncement(S.announcement); }
+      if (key === 'users' && S.announcement) renderAnnouncement(S.announcement);
       queueChange();
     }, err => {
       console.error('Orbit: cannot read /' + key, err);
@@ -285,6 +289,7 @@
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       if ($('.picker')) { closePicker(); return; }
+      if ($('.emoji-suggest')) { closeEmojiSuggestions(); return; }
       if ($('.lightbox')) { $('.lightbox').remove(); return; }
       const top = modalStack[modalStack.length - 1];
       if (top && top.dismissable) top.close();
@@ -340,6 +345,109 @@
     pickerState = { el: p, anchor, outside };
   }
 
+  // Typing a colon opens suggestions from the site's built-in Geometry Dash emoji set.
+  let suggestionState = null;
+  let suppressSuggestionOnce = null;
+  function closeEmojiSuggestions() {
+    if (!suggestionState) return;
+    suggestionState.el.remove();
+    suggestionState = null;
+  }
+  function shortcodeAtCaret(field) {
+    if (!field || (field.tagName !== 'TEXTAREA' && !(field.tagName === 'INPUT' && ['text', 'search'].includes(field.type)))) return null;
+    const caret = field.selectionStart;
+    if (caret == null) return null;
+    const match = field.value.slice(0, caret).match(/(^|\s):([a-z0-9_]{0,24}):?$/i);
+    if (!match) return null;
+    return { start: caret - match[0].length + match[1].length, end: caret, query: match[2] || '' };
+  }
+  function positionEmojiSuggestions() {
+    if (!suggestionState) return;
+    const fieldRect = suggestionState.field.getBoundingClientRect();
+    const box = suggestionState.el;
+    const width = Math.min(320, window.innerWidth - 16);
+    box.style.width = width + 'px';
+    let left = Math.min(Math.max(8, fieldRect.left), window.innerWidth - width - 8);
+    let top = fieldRect.bottom + 7;
+    if (top + box.offsetHeight > window.innerHeight - 8) top = Math.max(8, fieldRect.top - box.offsetHeight - 7);
+    box.style.left = left + 'px';
+    box.style.top = top + 'px';
+  }
+  function chooseSuggestedEmoji(id) {
+    if (!suggestionState) return;
+    const { field, range } = suggestionState;
+    const token = ':gd' + id + ':';
+    field.value = field.value.slice(0, range.start) + token + field.value.slice(range.end);
+    const caret = range.start + token.length;
+    closeEmojiSuggestions();
+    field.focus();
+    try { field.setSelectionRange(caret, caret); } catch (e) {}
+    suppressSuggestionOnce = { field, value: field.value, caret };
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  function showEmojiSuggestions(field, range) {
+    closeEmojiSuggestions();
+    const query = range.query.toLowerCase();
+    const ids = query.startsWith('gd')
+      ? EMOJI_IDS.filter(id => ('gd' + id).startsWith(query))
+      : EMOJI_IDS;
+    const box = el('div', { class: 'emoji-suggest', role: 'listbox', 'aria-label': 'Built-in site emojis' });
+    const help = el('div', { class: 'emoji-suggest-head' }, 'Site emojis', el('span', null, 'Choose one to insert it'));
+    const grid = el('div', { class: 'emoji-suggest-grid' });
+    box.append(help, grid);
+    const shown = ids;
+    if (!shown.length) box.append(el('div', { class: 'emoji-suggest-empty' }, 'No built-in emoji matches that code.'));
+    shown.forEach((id, index) => {
+      const button = el('button', {
+        type: 'button', class: 'emoji-suggest-item' + (index === 0 ? ' active' : ''),
+        role: 'option', 'aria-selected': index === 0 ? 'true' : 'false',
+        title: ':gd' + id + ':',
+        onpointerdown: e => e.preventDefault(),
+        onclick: () => chooseSuggestedEmoji(id)
+      }, el('span', { html: emojiImg(id, '') }), el('small', null, ':gd' + id + ':'));
+      grid.append(button);
+    });
+    document.body.append(box);
+    box.querySelectorAll('img').forEach(image => { image.loading = 'lazy'; });
+    suggestionState = { el: box, field, range, items: [...grid.querySelectorAll('.emoji-suggest-item')], active: 0 };
+    positionEmojiSuggestions();
+  }
+  document.addEventListener('input', event => {
+    const field = event.target;
+    if (suppressSuggestionOnce && suppressSuggestionOnce.field === field && suppressSuggestionOnce.value === field.value && suppressSuggestionOnce.caret === field.selectionStart) {
+      suppressSuggestionOnce = null;
+      closeEmojiSuggestions();
+      return;
+    }
+    suppressSuggestionOnce = null;
+    const range = shortcodeAtCaret(field);
+    if (!range) { closeEmojiSuggestions(); return; }
+    showEmojiSuggestions(event.target, range);
+  });
+  document.addEventListener('keydown', event => {
+    if (!suggestionState || event.target !== suggestionState.field) return;
+    if (event.key === 'Escape') { closeEmojiSuggestions(); return; }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const items = suggestionState.items;
+      if (!items.length) return;
+      suggestionState.active = (suggestionState.active + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      items.forEach((item, index) => {
+        const active = index === suggestionState.active;
+        item.classList.toggle('active', active);
+        item.setAttribute('aria-selected', String(active));
+      });
+    } else if (event.key === 'Enter' && suggestionState.items.length) {
+      event.preventDefault();
+      suggestionState.items[suggestionState.active].click();
+    }
+  });
+  document.addEventListener('pointerdown', event => {
+    if (suggestionState && !suggestionState.el.contains(event.target) && event.target !== suggestionState.field) closeEmojiSuggestions();
+  }, true);
+  window.addEventListener('resize', positionEmojiSuggestions);
+  document.addEventListener('scroll', positionEmojiSuggestions, true);
+
   // ---------- rich text ----------
   const URL_RE = /(https?:\/\/[^\s<>"']+)/g;
   function richHTML(text) {
@@ -393,6 +501,16 @@
   ];
   const okFrame = f => FRAMES.some(x => x[0] === f) ? f : 'none';
   const okEffect = f => EFFECTS.some(x => x[0] === f) ? f : 'none';
+  const safeTagColor = color => /^#[0-9a-f]{6}$/i.test(String(color || '')) ? color : '#8b5cf6';
+  const customTagEntries = id => Object.keys(S.userTags[id] || {})
+    .filter(tagId => S.userTags[id][tagId] && S.customTags[tagId])
+    .map(tagId => [tagId, S.customTags[tagId]])
+    .sort((a, b) => String(a[1].name || '').localeCompare(String(b[1].name || '')));
+  function customTagBadge(tag) {
+    const name = String(tag && tag.name || 'Tag').slice(0, 24);
+    return el('span', { class: 'badge custom-tag', style: '--tag-color:' + safeTagColor(tag && tag.color) },
+      el('span', { class: 'tag-label fx-' + okEffect(tag && tag.effect) }, name));
+  }
   const safeImg = src => (typeof src === 'string' && (/^data:image\//.test(src) || /^https:\/\//.test(src))) ? src : null;
 
   function avatarFrom(data, size = 40, onclick) {
@@ -417,6 +535,7 @@
     if (tag === 'OWNER') out.push(el('span', { class: 'badge owner' }, 'OWNER'));
     else if (tag === 'CO OWNER') out.push(el('span', { class: 'badge coowner' }, 'CO OWNER'));
     else if (S.roles[id] === 'admin') out.push(el('span', { class: 'badge' }, 'ADMIN'));
+    customTagEntries(id).forEach(([, customTag]) => out.push(customTagBadge(customTag)));
     return out;
   }
   function nameTag(id, withBadges = true) {
@@ -431,7 +550,8 @@
   /** Signature of everything about a user that affects how they render. */
   function userSig(id) {
     const u = S.users[id] || {};
-    return [u.name, u.avatar && u.avatar.length + u.avatar.slice(-24), u.effect, u.frame, isOwner(id), isAdmin(id)].join('|');
+    const tags = customTagEntries(id).map(([tagId, tag]) => [tagId, tag.name, tag.color, tag.effect]);
+    return [u.name, u.avatar && u.avatar.length + u.avatar.slice(-24), u.effect, u.frame, isOwner(id), isAdmin(id), JSON.stringify(tags)].join('|');
   }
 
   // ---------- uploads ----------
@@ -581,16 +701,27 @@
   function mountChrome(active) {
     if (chromeMounted) return; chromeMounted = true;
     const link = (href, key, icon, label) => el('a', { href, class: active === key ? 'active' : '', html: icon + `<span class="lbl">${label}</span>` });
-    const moreBtn = el('button', { type: 'button', class: active === 'more' ? 'active' : '', html: I.more + '<span class="lbl">More</span>' });
+    const archiveBtn = link('archive.html', 'archive', I.archive, 'Archive');
+    const groupsBtn = link('groups.html', 'groups', I.group, 'Groups');
     const dmLink = link('dms.html', 'dms', I.dm, 'DMs');
     dmLink.classList.add('has-dot');
     const dmDot = el('span', { class: 'nav-dot hidden' });
     dmLink.append(dmDot);
+    const batterySvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="17" height="10" rx="2"/><path d="M22 10v4M7 10v4"/></svg>';
+    const deviceTime = el('span', { class: 'nav-device-time' });
+    const deviceDate = el('span', { class: 'nav-device-date' });
+    const deviceBattery = el('span', { class: 'nav-device-battery' });
+    const deviceInfoBtn = el('button', { type: 'button', class: 'nav-device', title: 'Time, date, and battery', 'aria-label': 'Open time and battery details' },
+      el('span', { class: 'nav-device-icons', html: I.clock + batterySvg }),
+      el('span', { class: 'nav-device-copy' },
+        el('span', { class: 'nav-device-topline' }, deviceTime, deviceBattery), deviceDate));
     const nav = el('nav', { class: 'nav' },
       link('chat.html', 'chat', I.chat, 'Chat'),
       dmLink,
+      groupsBtn,
       link('post.html', 'posts', I.posts, 'Posts'),
-      moreBtn);
+      archiveBtn,
+      deviceInfoBtn);
     // unread DMs: a conversation is unread when its last activity is newer than my last read
     let uc = {}, rd = {};
     const paintDot = () => {
@@ -601,22 +732,82 @@
     db.ref('userConvs/' + uid).on('value', s => { uc = s.val() || {}; paintDot(); });
     db.ref('reads/' + uid).on('value', s => { rd = s.val() || {}; paintDot(); });
 
-    const menu = el('div', { class: 'more-menu' });
-    const item = (icon, label, fn) => el('button', { type: 'button', html: icon + esc(label), onclick: () => { menu.classList.remove('open'); fn(); } });
-    menu.append(
-      item(I.home, 'Home', () => { location.href = 'index.html'; }),
-      item(I.users, 'Members', openMembers),
-      item(I.user, 'Edit profile', () => openProfile({}))
-    );
-    moreBtn.onclick = (e) => { e.stopPropagation(); menu.classList.toggle('open'); };
-    document.addEventListener('pointerdown', e => { if (!menu.contains(e.target) && !moreBtn.contains(e.target)) menu.classList.remove('open'); });
-
     const profBtn = el('button', { class: 'corner-btn right', type: 'button', 'aria-label': 'Profile', title: 'Profile' });
     profBtn.onclick = () => openProfile({});
     const adminBtn = el('button', { class: 'corner-btn left hidden', type: 'button', 'aria-label': 'Admin', title: 'Admin panel', html: I.shield + '<span class="tag">ADMIN</span>' });
     adminBtn.onclick = () => openStaffPanel('admin');
 
-    document.body.append(nav, menu, profBtn, adminBtn);
+    document.body.append(nav, profBtn, adminBtn);
+
+    let batteryManager = null;
+    let batteryReady = false;
+    let deviceModal = null;
+    let deviceModalNodes = null;
+    let deviceInterval = null;
+    const formatTime = date => new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date);
+    const formatFullTime = date => new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(date);
+    const formatDay = date => new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).format(date);
+    const formatShortDay = date => new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric' }).format(date);
+    const batterySummary = () => {
+      if (!batteryReady) return '…';
+      if (!batteryManager) return '—';
+      return Math.round(batteryManager.level * 100) + '%' + (batteryManager.charging ? ' ⚡' : '');
+    };
+    const updateDeviceInfo = () => {
+      const date = new Date();
+      deviceTime.textContent = formatTime(date);
+      deviceDate.textContent = formatShortDay(date);
+      deviceBattery.textContent = batterySummary();
+      deviceInfoBtn.setAttribute('aria-label', formatTime(date) + ', ' + formatDay(date) + ', battery ' + batterySummary());
+      if (!deviceModalNodes) return;
+      deviceModalNodes.time.textContent = formatFullTime(date);
+      deviceModalNodes.day.textContent = formatDay(date);
+      if (!batteryReady) {
+        deviceModalNodes.battery.textContent = 'Checking battery status…';
+        deviceModalNodes.fill.style.width = '0%';
+        deviceModalNodes.bar.setAttribute('aria-valuenow', '0');
+      } else if (!batteryManager) {
+        deviceModalNodes.battery.textContent = 'Battery information is not available in this browser.';
+        deviceModalNodes.fill.style.width = '0%';
+        deviceModalNodes.bar.setAttribute('aria-valuenow', '0');
+      } else {
+        const level = Math.round(batteryManager.level * 100);
+        deviceModalNodes.battery.textContent = level + '% · ' + (batteryManager.charging ? 'Charging' : 'On battery');
+        deviceModalNodes.fill.style.width = level + '%';
+        deviceModalNodes.bar.setAttribute('aria-valuenow', String(level));
+      }
+    };
+    function openDeviceInfo() {
+      if (deviceModal) return;
+      const time = el('div', { class: 'device-clock-time' });
+      const day = el('div', { class: 'device-clock-day' });
+      const battery = el('div', { class: 'device-battery-status' });
+      const fill = el('div', { class: 'device-battery-fill' });
+      const bar = el('div', { class: 'device-battery-bar', role: 'meter', 'aria-label': 'Battery charge', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0' }, fill);
+      deviceModalNodes = { time, day, battery, fill, bar };
+      const body = el('div', { class: 'device-info-content' },
+        el('div', { class: 'device-clock-card' }, time, day),
+        el('div', { class: 'device-battery-card' },
+          el('div', { class: 'device-battery-heading' }, el('span', { html: batterySvg }), el('span', null, 'Device battery')),
+          battery, bar));
+      deviceModal = modal({ title: 'Time & battery', body, cls: 'device-info-modal', onClose: () => {
+        if (deviceInterval) clearInterval(deviceInterval);
+        deviceInterval = null; deviceModal = null; deviceModalNodes = null;
+      } });
+      updateDeviceInfo();
+      deviceInterval = setInterval(updateDeviceInfo, 1000);
+    }
+    deviceInfoBtn.onclick = openDeviceInfo;
+    setInterval(updateDeviceInfo, 15000);
+    if (typeof navigator.getBattery === 'function') {
+      try {
+        navigator.getBattery().then(battery => {
+          batteryManager = battery; batteryReady = true;
+          ['levelchange', 'chargingchange'].forEach(event => battery.addEventListener(event, updateDeviceInfo));
+          updateDeviceInfo();
+        }).catch(() => { batteryReady = true; updateDeviceInfo(); });
+      } catch (e) { batteryReady = true; updateDeviceInfo(); }
+    } else { batteryReady = true; updateDeviceInfo(); }
 
     let lastSig = '';
     const refresh = () => {
@@ -823,6 +1014,52 @@
     const t = timeoutLeft(id); if (t > 0) out.push(el('span', { class: 'status to' }, 'TIMED OUT · ' + fmtDur(t)));
     return out;
   }
+  let announcementTimer = null;
+  let visibleAnnouncementId = null;
+  function renderAnnouncement(announcement) {
+    if (announcementTimer) { clearTimeout(announcementTimer); announcementTimer = null; }
+    const old = $('.announcement-pill');
+    const startedAt = Number(announcement && announcement.sentAt);
+    const durationMs = Number(announcement && announcement.durationMs);
+    if (!announcement || typeof announcement.text !== 'string' || !Number.isFinite(startedAt) ||
+        !Number.isFinite(durationMs) || durationMs < 1000 || durationMs > 7 * 864e5) {
+      if (old) old.remove();
+      visibleAnnouncementId = null;
+      return;
+    }
+    const remaining = startedAt + durationMs - now();
+    if (remaining <= 0) {
+      if (old) old.remove();
+      visibleAnnouncementId = null;
+      return;
+    }
+
+    if (old) old.remove();
+    const id = String(announcement.id || (announcement.uid || 'announcement') + '-' + startedAt);
+    visibleAnnouncementId = id;
+    const sender = S.users[announcement.uid] || {
+      name: announcement.senderName || 'Orbit admin',
+      effect: announcement.senderEffect || 'none', frame: announcement.senderFrame || 'none'
+    };
+    const name = el('span', { class: 'announcement-name fx-' + okEffect(sender.effect) }, sender.name || 'Orbit admin');
+    const message = richEl(announcement.text);
+    message.classList.add('announcement-message');
+    const pill = el('div', { class: 'announcement-pill', role: 'status', 'aria-live': 'polite' },
+      avatarFrom(sender, 42),
+      el('div', { class: 'announcement-copy' },
+        el('div', { class: 'announcement-heading' }, name, el('span', { class: 'announcement-label' }, 'Announcement')),
+        message));
+    document.body.append(pill);
+    announcementTimer = setTimeout(() => {
+      if (visibleAnnouncementId !== id) return;
+      pill.classList.add('is-ending');
+      setTimeout(() => { if (visibleAnnouncementId === id) { pill.remove(); visibleAnnouncementId = null; } }, 260);
+    }, remaining);
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) renderAnnouncement(S.announcement);
+  });
+
   function openMembers() {
     const list = el('div');
     const search = el('input', { class: 'input', placeholder: 'Search members', style: 'margin-bottom:12px' });
@@ -871,7 +1108,7 @@
       const meta = (await db.ref('convs/' + cid).once('value')).val();
       if (!meta || !meta.members || !meta.members[uid]) throw new Error('You are not in this conversation');
       const ref = db.ref('convMsgs/' + cid).push();
-      const preview = (msg.text || (msg.attachments ? '📎 Attachment' : msg.share ? '📝 Shared a post' : '')).replace(/:gd\d+:/g, '🙂').slice(0, 120);
+      const preview = (msg.text || (msg.attachments ? '📎 Attachment' : msg.share ? (msg.share.type === 'community' ? '🏘️ Shared a community' : msg.share.type === 'archive' ? '🗃️ Shared an Archive box' : '📝 Shared a post') : msg.forward ? '↪ Forwarded message' : '')).replace(/:gd\d+:/g, '🙂').slice(0, 120);
       const upd = {};
       upd['convMsgs/' + cid + '/' + ref.key] = msg;
       upd['convs/' + cid + '/last'] = { uid, text: preview, ts: TS };
@@ -1004,7 +1241,7 @@
 
     const tabsEl = el('div', { class: 'tabs' });
     const content = el('div');
-    const tabNames = ['Users', 'Chat', 'Posts'];
+    const tabNames = ['Users', 'Chat', 'Posts', 'Tags', 'Announce'];
     let tab = 'Users';
     const detach = [];
     const cleanup = () => { detach.splice(0).forEach(fn => fn()); };
@@ -1030,6 +1267,8 @@
       if (tab === 'Users') usersTab();
       if (tab === 'Chat') chatTab();
       if (tab === 'Posts') postsTab();
+      if (tab === 'Tags') tagsTab();
+      if (tab === 'Announce') announcementsTab();
     }
 
     function protectedTag() { return el('span', { class: 'sub' }, 'Protected'); }
@@ -1061,6 +1300,7 @@
           } else {
             acts.append(timeoutButton(id));
           }
+          if (canModerate(id)) acts.append(el('button', { class: 'btn sm', onclick: () => openUserTags(id) }, 'Tags'));
           list.append(el('div', { class: 'mrow' }, avatar(id, 34, false),
             el('div', { class: 'grow' }, el('div', null, nameTag(id), ...statusTags(id)),
               el('div', { class: 'sub' }, (isOnline(id) ? '● online' : 'offline') + (owner ? ' · ' + id : ''))),
@@ -1072,6 +1312,226 @@
       on('change', fn); detach.push(() => { handlers.change = handlers.change.filter(f => f !== fn); });
       const tick = setInterval(render, 15000); detach.push(() => clearInterval(tick));
       render();
+    }
+
+    function tagsTab() {
+      const nameIn = el('input', { class: 'input', maxlength: 24, placeholder: 'Tag name, e.g. VIP', autocomplete: 'off' });
+      const colorIn = el('input', { class: 'tag-color-input', type: 'color', value: '#8b5cf6', title: 'Tag color' });
+      const effectChips = el('div', { class: 'chips' });
+      const preview = el('div', { style: 'display:flex;align-items:center;gap:8px;min-height:28px;margin-top:10px' });
+      const savedList = el('div');
+      let createEffect = 'none';
+      const paintCreatePreview = () => {
+        preview.replaceChildren(el('span', { class: 'muted', style: 'font-size:12px' }, 'Preview'),
+          customTagBadge({ name: nameIn.value.trim() || 'Tag', color: colorIn.value, effect: createEffect }));
+      };
+      EFFECTS.forEach(([value, label]) => effectChips.append(el('button', {
+        type: 'button', class: 'chip' + (value === createEffect ? ' on' : ''),
+        onclick: () => { createEffect = value; effectChips.querySelectorAll('.chip').forEach(b => b.classList.toggle('on', b.dataset.effect === value)); paintCreatePreview(); },
+        'data-effect': value
+      }, label)));
+      nameIn.addEventListener('input', paintCreatePreview);
+      colorIn.addEventListener('input', paintCreatePreview);
+
+      const createTag = async () => {
+        const name = nameIn.value.trim();
+        if (!name) { toast('Enter a tag name', true); nameIn.focus(); return; }
+        if (name.length > 24) { toast('Tag names can be up to 24 characters', true); return; }
+        if (Object.values(S.customTags).some(tag => String(tag.name || '').toLowerCase() === name.toLowerCase())) {
+          toast('A tag with that name already exists', true); return;
+        }
+        try {
+          const ref = db.ref('customTags').push();
+          await ref.set({ name, color: safeTagColor(colorIn.value), effect: okEffect(createEffect), updatedAt: TS });
+          nameIn.value = '';
+          paintCreatePreview();
+          toast('Tag created');
+        } catch (e) { toast('Could not create tag', true); }
+      };
+      const createCard = el('div', { class: 'tag-card' },
+        el('div', { class: 'muted', style: 'font-size:13px;margin-bottom:8px' }, 'Create tags and apply them to users from the Users tab. They appear beside names across the site.'),
+        el('label', { class: 'label' }, 'Tag name'), nameIn,
+        el('div', { class: 'tag-options tag-create-options' }, el('div', null, el('label', { class: 'label' }, 'Color'), colorIn),
+          el('div', null, el('label', { class: 'label' }, 'Nickname effect'), effectChips)),
+        preview,
+        el('div', { style: 'display:flex;justify-content:flex-end;margin-top:12px' }, el('button', { class: 'btn sm primary', onclick: createTag }, 'Create tag')));
+
+      const renderSaved = () => {
+        savedList.innerHTML = '';
+        const tags = Object.entries(S.customTags).sort((a, b) => String(a[1].name || '').localeCompare(String(b[1].name || '')));
+        if (!tags.length) { savedList.append(el('div', { class: 'empty' }, 'No custom tags yet')); return; }
+        tags.forEach(([id, tag]) => {
+          const tagName = el('input', { class: 'input', maxlength: 24, value: tag.name || '', 'aria-label': 'Tag name' });
+          const tagColor = el('input', { class: 'tag-color-input', type: 'color', value: safeTagColor(tag.color), title: 'Tag color', 'aria-label': 'Tag color' });
+          const tagEffect = el('select', { class: 'select tag-effect-select', 'aria-label': 'Tag nickname effect' },
+            EFFECTS.map(([value, label]) => el('option', { value, selected: okEffect(tag.effect) === value }, label)));
+          const sample = el('div', { style: 'display:flex;align-items:center;gap:7px;min-height:26px' });
+          const paintSample = () => sample.replaceChildren(customTagBadge({ name: tagName.value.trim() || 'Tag', color: tagColor.value, effect: tagEffect.value }));
+          tagName.addEventListener('input', paintSample);
+          tagColor.addEventListener('input', paintSample);
+          tagEffect.addEventListener('change', paintSample);
+          paintSample();
+          const save = async () => {
+            const name = tagName.value.trim();
+            if (!name) { toast('Tag name cannot be empty', true); tagName.focus(); return; }
+            if (Object.entries(S.customTags).some(([otherId, other]) => otherId !== id && String(other.name || '').toLowerCase() === name.toLowerCase())) {
+              toast('A tag with that name already exists', true); return;
+            }
+            try {
+              await db.ref('customTags/' + id).update({ name, color: safeTagColor(tagColor.value), effect: okEffect(tagEffect.value), updatedAt: TS });
+              toast('Tag saved');
+            } catch (e) { toast('Could not save tag', true); }
+          };
+          const remove = async () => {
+            if (!(await confirmBox('Delete the “' + String(tag.name || 'Tag') + '” tag from all users?', 'Delete tag', true))) return;
+            const updates = { ['customTags/' + id]: null };
+            Object.keys(S.userTags).forEach(userId => {
+              if (S.userTags[userId] && S.userTags[userId][id]) updates['userTags/' + userId + '/' + id] = null;
+            });
+            try { await db.ref().update(updates); toast('Tag deleted'); }
+            catch (e) { toast('Could not delete tag', true); }
+          };
+          savedList.append(el('div', { class: 'tag-card' },
+            el('div', { class: 'tag-saved-head' }, sample, el('span', { class: 'grow' }),
+              el('button', { class: 'btn sm danger', onclick: remove }, 'Delete')),
+            el('div', { class: 'tag-options tag-edit-options' }, tagName, tagColor, tagEffect),
+            el('div', { style: 'display:flex;justify-content:flex-end;margin-top:10px' }, el('button', { class: 'btn sm', onclick: save }, 'Save changes'))));
+        });
+      };
+      content.append(createCard, el('div', { class: 'tag-list-title' }, 'Existing tags'), savedList);
+      const fn = () => renderSaved();
+      on('customTags', fn); detach.push(() => { handlers.customTags = (handlers.customTags || []).filter(f => f !== fn); });
+      renderSaved();
+      paintCreatePreview();
+    }
+
+    function announcementsTab() {
+      const textIn = el('textarea', { class: 'textarea', rows: 4, maxlength: 500, placeholder: 'Write an announcement for everyone…' });
+      const emojiBtn = el('button', { type: 'button', class: 'btn sm', html: I.smile.replace('<svg', '<svg width="16" height="16"'), title: 'Insert emoji', 'aria-label': 'Insert emoji' }, 'Emoji');
+      const charCount = el('span', { class: 'muted', style: 'font-size:12px' }, '0 / 500');
+      const durationIn = el('input', { class: 'input', type: 'number', min: 1, max: 10080, value: 5, 'aria-label': 'Announcement duration' });
+      const unitIn = el('select', { class: 'select', 'aria-label': 'Duration unit' }, [
+        el('option', { value: 's' }, 'seconds'), el('option', { value: 'm', selected: true }, 'minutes'),
+        el('option', { value: 'h' }, 'hours'), el('option', { value: 'd' }, 'days')
+      ]);
+      const preview = el('div', { class: 'announcement-preview' });
+      const active = el('div', { class: 'announcement-current hidden' });
+      const sendBtn = el('button', { class: 'btn primary', onclick: sendAnnouncement }, 'Send to everyone');
+      const updatePreview = () => {
+        const sender = me() || { name: 'Your profile' };
+        const name = el('span', { class: 'announcement-name fx-' + okEffect(sender.effect) }, sender.name || 'Your profile');
+        const message = richEl(textIn.value.trim() || 'Your announcement will appear here.');
+        message.classList.add('announcement-message');
+        preview.replaceChildren(avatarFrom(sender, 38), el('div', { class: 'announcement-copy' },
+          el('div', { class: 'announcement-heading' }, name, el('span', { class: 'announcement-label' }, 'Announcement')), message));
+      };
+      const insertEmoji = id => {
+        const token = ':gd' + id + ':';
+        const start = textIn.selectionStart == null ? textIn.value.length : textIn.selectionStart;
+        const end = textIn.selectionEnd == null ? start : textIn.selectionEnd;
+        textIn.value = textIn.value.slice(0, start) + token + textIn.value.slice(end);
+        const cursor = start + token.length;
+        textIn.focus(); textIn.setSelectionRange(cursor, cursor);
+        textIn.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      emojiBtn.onclick = () => openPicker(emojiBtn, insertEmoji, { title: 'Announcement emojis' });
+      textIn.addEventListener('input', () => { charCount.textContent = textIn.value.length + ' / 500'; updatePreview(); });
+      unitIn.addEventListener('change', () => {
+        const max = { s: 604800, m: 10080, h: 168, d: 7 }[unitIn.value];
+        durationIn.max = String(max);
+        if (Number(durationIn.value) > max) durationIn.value = String(max);
+      });
+
+      const renderActive = () => {
+        const a = S.announcement;
+        const remaining = Number(a && a.sentAt) + Number(a && a.durationMs) - now();
+        active.replaceChildren();
+        if (!a || typeof a.text !== 'string' || !Number.isFinite(remaining) || remaining <= 0) {
+          active.classList.add('hidden'); return;
+        }
+        active.classList.remove('hidden');
+        const message = richEl(a.text); message.classList.add('announcement-message');
+        active.append(el('div', { class: 'announcement-current-head' },
+          el('span', null, 'Currently live · ends in ' + fmtDur(remaining)),
+          el('button', { class: 'btn sm danger', onclick: async () => {
+            try { await db.ref('announcement').remove(); toast('Announcement ended'); }
+            catch (e) { toast('Could not end announcement', true); }
+          } }, 'End announcement')),
+          message);
+      };
+      const onAnnouncement = () => renderActive();
+      on('announcement', onAnnouncement);
+      detach.push(() => { handlers.announcement = (handlers.announcement || []).filter(fn => fn !== onAnnouncement); });
+      const tick = setInterval(renderActive, 1000); detach.push(() => clearInterval(tick));
+
+      async function sendAnnouncement() {
+        const text = textIn.value.trim();
+        const amount = Number(durationIn.value);
+        const units = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+        const max = { s: 604800, m: 10080, h: 168, d: 7 }[unitIn.value];
+        if (!text) { toast('Write an announcement first', true); textIn.focus(); return; }
+        if (text.length > 500) { toast('Announcements can be up to 500 characters', true); return; }
+        if (!Number.isInteger(amount) || amount < 1 || amount > max) {
+          toast('Choose a duration between 1 and ' + max + ' ' + unitIn.options[unitIn.selectedIndex].text, true); durationIn.focus(); return;
+        }
+        if (!me()) { toast('Set up your profile before sending an announcement', true); return; }
+        const sender = me();
+        sendBtn.disabled = true;
+        try {
+          await db.ref('announcement').set({
+            id: db.ref().push().key, uid, senderName: sender.name,
+            senderEffect: okEffect(sender.effect), senderFrame: okFrame(sender.frame),
+            text, durationMs: amount * units[unitIn.value], sentAt: TS
+          });
+          textIn.value = ''; charCount.textContent = '0 / 500'; updatePreview();
+          toast('Announcement sent to everyone');
+        } catch (e) { toast('Could not send announcement', true); }
+        finally { sendBtn.disabled = false; }
+      }
+
+      content.append(
+        el('div', { class: 'muted announcement-help' }, 'Send a message to everyone. It appears in a top-center pill and disappears after the duration you set.'),
+        el('label', { class: 'label' }, 'Message'),
+        el('div', { class: 'announcement-editor' }, textIn,
+          el('div', { class: 'announcement-editor-tools' }, emojiBtn, charCount)),
+        el('label', { class: 'label' }, 'Duration'),
+        el('div', { class: 'announcement-duration' }, durationIn, unitIn),
+        el('label', { class: 'label' }, 'Preview'), preview,
+        el('div', { class: 'announcement-send-row' }, sendBtn),
+        active);
+      updatePreview();
+      renderActive();
+    }
+
+    function openUserTags(id) {
+      const userName = (user(id) || {}).name || 'user';
+      const available = Object.entries(S.customTags).sort((a, b) => String(a[1].name || '').localeCompare(String(b[1].name || '')));
+      const selected = new Set(available.filter(([tagId]) => S.userTags[id] && S.userTags[id][tagId]).map(([tagId]) => tagId));
+      const choices = el('div', { class: 'chips' });
+      const body = el('div', null,
+        el('div', { class: 'muted', style: 'font-size:13px;margin-bottom:12px' }, 'Choose the custom tags shown beside ' + userName + '’s name.'), choices);
+      const drawChoices = () => {
+        choices.innerHTML = '';
+        if (!available.length) { choices.append(el('div', { class: 'empty' }, 'No custom tags yet. Create one in the Tags tab.')); return; }
+        available.forEach(([tagId, tag]) => {
+          const on = selected.has(tagId);
+          choices.append(el('button', { type: 'button', class: 'chip' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false',
+            onclick: () => { if (selected.has(tagId)) selected.delete(tagId); else selected.add(tagId); drawChoices(); } }, customTagBadge(tag)));
+        });
+      };
+      const m = modal({ title: 'Tags · ' + userName, body, foot: [
+        el('button', { class: 'btn sm', onclick: () => m.close() }, 'Cancel'),
+        el('button', { class: 'btn sm primary', onclick: async () => {
+          try {
+            const assignments = {};
+            selected.forEach(tagId => { assignments[tagId] = true; });
+            if (Object.keys(assignments).length) await db.ref('userTags/' + id).set(assignments);
+            else await db.ref('userTags/' + id).remove();
+            m.close(); toast('User tags updated');
+          } catch (e) { toast('Could not update user tags', true); }
+        } }, 'Save tags')
+      ] });
+      drawChoices();
     }
 
     function chatTab() {

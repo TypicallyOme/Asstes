@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Orbit · Posts</title>
   <meta name="theme-color" content="#000000">
+  <link rel="icon" type="image/png" href="favicon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -34,6 +35,18 @@
     .ntp .lbl { position: relative; z-index: 1; word-break: break-all; }
     .ntp.err { border-color: var(--danger); color: var(--danger); }
     .blocked-note { font-size: 13px; color: #f1c65a; margin-top: 6px; }
+    .nt-embed-editor { margin-top: 10px; padding: 12px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--bg-2); }
+    .nt-embed-panel label { display: block; font-size: 12px; color: var(--text-2); margin: 0 0 6px; }
+    .nt-embed-panel input, .nt-embed-panel textarea { width: 100%; border: 1px solid var(--line-2); border-radius: 9px; background: var(--surface-2); padding: 9px 10px; outline: none; }
+    .nt-embed-panel textarea { min-height: 120px; resize: vertical; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .nt-embed-hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .nt-embed-toggle.on { border-color: #fff; color: #fff; background: #ffffff12; }
+    .nt-embed-toggle svg { width: 18px; height: 18px; }
+    .nt-embed-clear-row { display: flex; justify-content: flex-end; margin-top: 8px; }
+    .post-embed { margin-top: 12px; border: 1px solid var(--line-2); border-radius: 14px; overflow: hidden; background: #111; }
+    .post-embed iframe { display: block; width: 100%; height: min(62vh, 480px); min-height: 240px; border: 0; background: #111; }
+    @media (max-width: 560px) { .post-embed iframe { height: 58vh; } .nt-embed-toggle { padding: 0 8px; } }
+
 
     /* thread */
     .thread { display: flex; gap: 12px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); position: relative; }
@@ -135,10 +148,25 @@
           <input id="ntTitle" class="nt-title" maxlength="100" placeholder="Title (optional)" autocomplete="off">
           <textarea id="ntText" rows="1" maxlength="5000" placeholder="Start a thread…"></textarea>
           <div class="nt-pending" id="ntPending"></div>
+          <div class="nt-embed-editor hidden" id="ntEmbedEditor">
+            <div class="nt-embed-panel hidden" id="ntEmbedUrlPane">
+              <label for="ntEmbedUrl">Page URL</label>
+              <input id="ntEmbedUrl" type="url" maxlength="2048" placeholder="https://example.com">
+              <div class="nt-embed-hint">Some websites block being shown inside an iframe.</div>
+            </div>
+            <div class="nt-embed-panel hidden" id="ntEmbedHtmlPane">
+              <label for="ntEmbedHtml">HTML code</label>
+              <textarea id="ntEmbedHtml" maxlength="20000" spellcheck="false" placeholder="Paste HTML code here"></textarea>
+              <div class="nt-embed-hint">HTML runs in a sandboxed iframe, separate from Orbit.</div>
+            </div>
+            <div class="nt-embed-clear-row"><button class="btn sm ghost hidden" id="ntEmbedClear" type="button">Clear embed</button></div>
+          </div>
           <div class="blocked-note hidden" id="ntBlocked"></div>
           <div class="nt-tools">
             <button class="icon-btn" id="ntAttach" type="button" title="Add images, audio or video"></button>
             <button class="icon-btn" id="ntEmoji" type="button" title="Emojis"></button>
+            <button class="icon-btn nt-embed-toggle" id="ntEmbedUrlBtn" type="button" title="Embed a link in an iframe" aria-label="Embed a link in an iframe"></button>
+            <button class="icon-btn nt-embed-toggle" id="ntEmbedHtmlBtn" type="button" title="Embed HTML code" aria-label="Embed HTML code"></button>
             <input type="file" id="ntFile" class="hidden" multiple>
             <span class="grow"></span>
             <span class="count" id="ntCount"></span>

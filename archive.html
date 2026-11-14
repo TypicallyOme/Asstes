@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orbit · Archive</title>
+  <meta name="theme-color" content="#000000">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/orbit.css">
+  <link rel="stylesheet" href="css/more.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="logo" href="index.html">Orbit</a>
+    <span class="title">Archive</span>
+    <span class="spacer"></span>
+  </header>
+
+  <main class="more-main">
+    <div class="more-heading">
+      <div>
+        <h1 class="more-title">Archive</h1>
+        <p class="more-subtitle">Boxes shared by the community.</p>
+      </div>
+      <div class="more-actions">
+        <button class="btn sm primary" id="addMoreCard" type="button">Create box</button>
+      </div>
+    </div>
+    <section class="more-grid" id="moreGrid" aria-live="polite"></section>
+    <div class="more-empty hidden" id="moreEmpty">No boxes yet.</div>
+  </main>
+
+  <div class="more-viewer hidden" id="moreViewer" role="dialog" aria-modal="true" aria-label="Link preview">
+    <section class="more-viewer-panel" id="moreViewerPanel">
+      <header class="more-viewer-head">
+        <button class="more-viewer-close" id="moreViewerClose" type="button" aria-label="Close preview"></button>
+        <h2 id="moreViewerTitle">Link preview</h2>
+      </header>
+      <iframe class="more-viewer-frame" id="moreViewerFrame" title="Link preview" allow="fullscreen; autoplay; encrypted-media" allowfullscreen referrerpolicy="no-referrer"></iframe>
+      <footer class="more-viewer-foot">
+        <button class="btn sm" id="moreRefresh" type="button">Refresh</button>
+        <button class="btn sm" id="moreBlank" type="button">Open in about:blank</button>
+        <span class="grow"></span>
+        <button class="btn sm primary" id="moreFullscreen" type="button">Fullscreen</button>
+      </footer>
+    </section>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
+  <script src="js/orbit.js"></script>
+  <script src="js/more.js"></script>
+</body>
+</html>
