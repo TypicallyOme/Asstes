@@ -1,0 +1,1179 @@
+/* ============================================================
+   ORBIT — shared core
+   Firebase, identity, profiles, nav, emoji, uploads,
+   moderation, owner panel and admin panel.
+   ============================================================ */
+(function () {
+  'use strict';
+
+  // ---------- Firebase ----------
+  const firebaseConfig = {
+    apiKey: "AIzaSyCrZmgL8mkK90qdnJ-WkHRaEMAHsgUQ3yM",
+    authDomain: "orbit-5b26f.firebaseapp.com",
+    databaseURL: "https://orbit-5b26f-default-rtdb.firebaseio.com",
+    projectId: "orbit-5b26f",
+    storageBucket: "orbit-5b26f.firebasestorage.app",
+    messagingSenderId: "964534662601",
+    appId: "1:964534662601:web:b067a00860f9e2f6d96418"
+  };
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+  const TS = firebase.database.ServerValue.TIMESTAMP;
+  // Set to true once Firebase Storage is enabled for the project (Console → Storage → Get started).
+  // While false, uploads are stored in the Realtime Database (max ~9.5 MB per file).
+  const USE_FIREBASE_STORAGE = false;
+  let storage = null;
+  if (USE_FIREBASE_STORAGE) try {
+    storage = firebase.storage();
+    storage.setMaxUploadRetryTime(15000);
+    storage.setMaxOperationRetryTime(15000);
+  } catch (e) { storage = null; }
+
+  // sha256("tokoolkoala")
+  const OWNER_HASH = '9836a25f7d02c52e66faf055ae73b36ed70d99f959310953851ef68f63e827c7';
+  // Name-based staff tags. These nicknames are reserved: taking one needs the owner password.
+  const STAFF_NAMES = { omere: 'OWNER', ooze34: 'CO OWNER' };
+  const DB_FILE_MAX = 9.5 * 1024 * 1024;     // fallback (Realtime Database) upload cap
+  const STORAGE_FILE_MAX = 50 * 1024 * 1024; // Firebase Storage upload cap
+
+  let serverOffset = 0;
+  db.ref('.info/serverTimeOffset').on('value', s => { serverOffset = s.val() || 0; });
+  const now = () => Date.now() + serverOffset;
+
+  // ---------- tiny helpers ----------
+  const ls = {
+    get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+    del(k) { try { localStorage.removeItem(k); } catch (e) {} }
+  };
+  const ss = {
+    get(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} },
+    del(k) { try { sessionStorage.removeItem(k); } catch (e) {} }
+  };
+  const $ = (s, r = document) => r.querySelector(s);
+  function el(tag, attrs, ...kids) {
+    const e = document.createElement(tag);
+    if (attrs) for (const k in attrs) {
+      const v = attrs[k];
+      if (v == null || v === false) continue;
+      if (k === 'class') e.className = v;
+      else if (k === 'html') e.innerHTML = v;
+      else if (k === 'text') e.textContent = v;
+      else if (k === 'style') e.style.cssText = v;
+      else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+      else e.setAttribute(k, v === true ? '' : v);
+    }
+    for (const kid of kids.flat()) {
+      if (kid == null || kid === false) continue;
+      e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    }
+    return e;
+  }
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const nameKey = n => n.toLowerCase().replace(/\./g, ',');
+  const NAME_RE = /^[A-Za-z0-9_.-]{2,20}$/;
+
+  function timeAgo(ts) {
+    const d = Math.max(0, now() - ts) / 1000;
+    if (d < 45) return 'now';
+    if (d < 3600) return Math.round(d / 60) + 'm';
+    if (d < 86400) return Math.round(d / 3600) + 'h';
+    if (d < 604800) return Math.round(d / 86400) + 'd';
+    return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+  function clock(ts) {
+    const d = new Date(ts), t = new Date();
+    const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    if (d.toDateString() === t.toDateString()) return time;
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' + time;
+  }
+  function fmtDur(ms) {
+    const s = Math.ceil(ms / 1000);
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.ceil(s / 60) + 'm';
+    if (s < 86400) return Math.round(s / 3600) + 'h';
+    return Math.round(s / 86400) + 'd';
+  }
+  function fmtSize(b) {
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+  }
+  async function sha256(str) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // ---------- icons ----------
+  const svg = p => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
+  const I = {
+    chat: svg('<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>'),
+    posts: svg('<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8 9h8M8 13h8M8 17h5"/>'),
+    more: svg('<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>'),
+    home: svg('<path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/>'),
+    users: svg('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M21.5 20a6.5 6.5 0 0 0-4-6"/>'),
+    user: svg('<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>'),
+    shield: svg('<path d="M12 3 4.5 6v6c0 4.5 3.2 8 7.5 9 4.3-1 7.5-4.5 7.5-9V6z"/><path d="m9 12 2 2 4-4"/>'),
+    smile: svg('<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0"/><path d="M9 9.5h.01M15 9.5h.01"/>'),
+    clip: svg('<path d="m20.5 11.5-8.3 8.3a5 5 0 0 1-7-7l8.3-8.3a3.3 3.3 0 0 1 4.7 4.7l-8.3 8.3a1.7 1.7 0 0 1-2.4-2.4l7.6-7.6"/>'),
+    send: svg('<path d="M5 12h13M13 6l6 6-6 6"/>'),
+    reply: svg('<path d="M10 8 4 13l6 5"/><path d="M4 13h10a6 6 0 0 1 6 6"/>'),
+    edit: svg('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>'),
+    trash: svg('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>'),
+    clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+    x: svg('<path d="M6 6l12 12M18 6 6 18"/>'),
+    plus: svg('<path d="M12 5v14M5 12h14"/>'),
+    share: svg('<path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><path d="M12 15V3M7 8l5-5 5 5"/>'),
+    comment: svg('<path d="M20 15a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z"/>'),
+    music: svg('<path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>'),
+    lock: svg('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'),
+    crown: svg('<path d="m3 8 4 4 5-7 5 7 4-4-2 11H5z"/>'),
+    dm: svg('<path d="M21 4 3 11l7 2.5L12.5 21z"/><path d="m10 13.5 4.5-4.5"/>'),
+    group: svg('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M19 8v6M16 11h6"/>'),
+    back: svg('<path d="M15 5 8 12l7 7"/>'),
+    react: svg('<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/>')
+  };
+
+  // ---------- events ----------
+  const handlers = {};
+  const on = (evt, fn) => { (handlers[evt] = handlers[evt] || []).push(fn); };
+  const off = (evt, fn) => { if (handlers[evt]) handlers[evt] = handlers[evt].filter(f => f !== fn); };
+  const emit = (evt, d) => (handlers[evt] || []).forEach(fn => { try { fn(d); } catch (e) { console.error(e); } });
+
+  // ---------- identity ----------
+  let uid = ls.get('orbit_uid');
+  if (!uid || !/^[A-Za-z0-9_-]{8,40}$/.test(uid)) { uid = db.ref().push().key; ls.set('orbit_uid', uid); }
+
+  // ---------- live state ----------
+  const S = { users: {}, roles: {}, owners: {}, mod: {}, presence: {}, byName: {}, loaded: {} };
+  let readyResolve;
+  const ready = new Promise(r => { readyResolve = r; });
+  let changeQueued = false;
+  function queueChange() {
+    if (changeQueued) return;
+    changeQueued = true;
+    requestAnimationFrame(() => { changeQueued = false; emit('change'); selfCheck(); });
+  }
+  ['users', 'roles', 'owners', 'mod', 'presence'].forEach(key => {
+    db.ref(key).on('value', snap => {
+      S[key] = snap.val() || {};
+      if (key === 'users') {
+        S.byName = {};
+        for (const id in S.users) { const u = S.users[id]; if (u && u.name) S.byName[u.name.toLowerCase()] = id; }
+      }
+      S.loaded[key] = true;
+      if (['users', 'roles', 'owners', 'mod'].every(k => S.loaded[k])) readyResolve();
+      queueChange();
+    }, err => {
+      console.error('Orbit: cannot read /' + key, err);
+      toast('Database access denied — check your Realtime Database rules', true);
+    });
+  });
+
+  db.ref('.info/connected').on('value', s => {
+    if (!s.val()) return;
+    const r = db.ref('presence/' + uid);
+    r.onDisconnect().remove();
+    r.set({ ts: TS });
+  });
+
+  const me = () => S.users[uid] && S.users[uid].name ? S.users[uid] : null;
+  const user = id => (S.users[id] && S.users[id].name) ? S.users[id] : null;
+  const isOwner = (id = uid) => !!S.owners[id];
+  /** OWNER / CO OWNER tag: only for people who unlocked the owner panel AND use the matching name. */
+  const staffTag = id => { const u = S.users[id]; return (isOwner(id) && u && u.name && STAFF_NAMES[u.name.toLowerCase()]) || null; };
+  const isAdmin = (id = uid) => S.roles[id] === 'admin' || isOwner(id);
+  const ownerUnlocked = () => isOwner() && ss.get('orbit_owner') === '1';
+  const isBanned = (id = uid) => !!(S.mod[id] && S.mod[id].banned);
+  const timeoutLeft = (id = uid) => Math.max(0, ((S.mod[id] && S.mod[id].timeoutUntil) || 0) - now());
+  const isOnline = id => !!S.presence[id];
+  const userByName = n => S.byName[String(n).toLowerCase()] || null;
+
+  /** Can the current user moderate content/profile belonging to `target`? Owners are untouchable. */
+  function canModerate(target) {
+    if (!isAdmin()) return false;
+    if (target && isOwner(target) && target !== uid) return false;
+    return true;
+  }
+
+  /** Gate for any write action (send, post, react, comment). */
+  function canAct(silent) {
+    if (isBanned()) { if (!silent) toast('You are banned', true); return false; }
+    const left = timeoutLeft();
+    if (left > 0) { if (!silent) toast('You are timed out for ' + fmtDur(left), true); return false; }
+    if (!me()) { if (!silent) openProfile({ setup: true }); return false; }
+    return true;
+  }
+
+  // ---------- toast ----------
+  function toast(msg, err) {
+    let box = $('.toasts');
+    if (!box) { box = el('div', { class: 'toasts' }); document.body.append(box); }
+    const t = el('div', { class: 'toast' + (err ? ' err' : '') }, msg);
+    box.append(t);
+    setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2600);
+  }
+
+  // ---------- modal ----------
+  const modalStack = [];
+  function modal({ title, body, foot, wide, position, dismissable = true, onClose, cls }) {
+    const bd = el('div', { class: 'backdrop ' + (position || '') + ' ' + (cls || '') });
+    const head = el('div', { class: 'panel-head' }, el('h3', null, title || ''));
+    const bodyEl = el('div', { class: 'panel-body' });
+    if (body) bodyEl.append(body);
+    const panel = el('div', { class: 'panel' + (wide ? ' wide' : '') }, head, bodyEl);
+    let footEl = null;
+    if (foot) { footEl = el('div', { class: 'panel-foot' }); footEl.append(...[].concat(foot)); panel.append(footEl); }
+    bd.append(panel);
+    let closed = false;
+    const api = {
+      el: panel, body: bodyEl, foot: footEl, head, backdrop: bd, dismissable,
+      close() {
+        if (closed) return; closed = true;
+        bd.remove();
+        const i = modalStack.indexOf(api); if (i >= 0) modalStack.splice(i, 1);
+        onClose && onClose();
+      }
+    };
+    if (dismissable) {
+      head.append(el('button', { class: 'icon-btn', 'aria-label': 'Close', html: I.x, onclick: () => api.close() }));
+      bd.addEventListener('pointerdown', e => { if (e.target === bd) api.close(); });
+    }
+    document.body.append(bd);
+    modalStack.push(api);
+    return api;
+  }
+  function confirmBox(text, okLabel = 'Confirm', danger) {
+    return new Promise(res => {
+      let done = false;
+      const ok = el('button', { class: 'btn ' + (danger ? 'danger' : 'primary') }, okLabel);
+      const cancel = el('button', { class: 'btn ghost' }, 'Cancel');
+      const m = modal({ title: 'Are you sure?', body: el('p', { style: 'margin:0;color:var(--text-2)' }, text), foot: [cancel, ok], onClose: () => { if (!done) res(false); } });
+      ok.onclick = () => { done = true; m.close(); res(true); };
+      cancel.onclick = () => m.close();
+      ok.focus();
+    });
+  }
+  function promptText({ title, value = '', placeholder = '', okLabel = 'Save', multiline = true, type = 'text' }) {
+    return new Promise(res => {
+      let done = false;
+      const input = multiline
+        ? el('textarea', { class: 'textarea', placeholder, rows: 5 })
+        : el('input', { class: 'input', placeholder, type });
+      input.value = value;
+      const ok = el('button', { class: 'btn primary' }, okLabel);
+      const cancel = el('button', { class: 'btn ghost' }, 'Cancel');
+      const m = modal({ title, body: input, foot: [cancel, ok], onClose: () => { if (!done) res(null); } });
+      const submit = () => { done = true; const v = input.value; m.close(); res(v); };
+      ok.onclick = submit;
+      cancel.onclick = () => m.close();
+      input.addEventListener('keydown', e => { if (e.key === 'Enter' && (!multiline || e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); } });
+      setTimeout(() => input.focus(), 30);
+    });
+  }
+  function chooseDuration(name) {
+    return new Promise(res => {
+      let done = false;
+      const opts = [['1 min', 6e4], ['5 min', 3e5], ['10 min', 6e5], ['1 hour', 36e5], ['1 day', 864e5], ['1 week', 6048e5]];
+      const chips = el('div', { class: 'chips' });
+      const m = modal({ title: 'Time out ' + (name || 'user'), body: chips, onClose: () => { if (!done) res(null); } });
+      opts.forEach(([label, ms]) => chips.append(el('button', { class: 'chip', onclick: () => { done = true; m.close(); res(ms); } }, label)));
+    });
+  }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      if ($('.picker')) { closePicker(); return; }
+      if ($('.lightbox')) { $('.lightbox').remove(); return; }
+      const top = modalStack[modalStack.length - 1];
+      if (top && top.dismissable) top.close();
+    }
+  });
+
+  // ---------- emoji (Geometry Dash faces) ----------
+  const EMOJI_BASE = 'https://cdn.jsdelivr.net/gh/TypicallyOme/Website-Assets@main/features/assets/Geometry%20Dash%20Faces/';
+  const EMOJI_IDS = [193,194,195,196,197,199,200,201,202,203,205,207,208,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300,301,302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,318,319,320,321,322,323,324,325,326,327,328,329,330,331,332,333,334,335,336,337,338,339,340,341,342,343,344,345,346,347,348,349,350,351,352,353,354,355,356,357,358,359,360,361,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63];
+  const EMOJI_INDEX = new Map(EMOJI_IDS.map((id, i) => [String(id), i]));
+  const isEmoji = id => EMOJI_INDEX.has(String(id));
+  const emojiUrl = id => EMOJI_BASE + 'imgi_' + (EMOJI_INDEX.get(String(id)) + 3) + '_particle' + id + '001.png';
+  const emojiImg = (id, cls = 'emo') => `<img class="${cls}" src="${emojiUrl(id)}" alt=":gd${id}:" title=":gd${id}:" draggable="false">`;
+
+  function recentEmojis() {
+    try { return (JSON.parse(ls.get('orbit_recent_emo') || '[]')).filter(isEmoji); } catch (e) { return []; }
+  }
+  function pushRecent(id) {
+    const r = [String(id), ...recentEmojis().filter(x => x !== String(id))].slice(0, 14);
+    ls.set('orbit_recent_emo', JSON.stringify(r));
+  }
+
+  let pickerState = null;
+  function closePicker() {
+    if (!pickerState) return;
+    pickerState.el.remove();
+    document.removeEventListener('pointerdown', pickerState.outside, true);
+    pickerState = null;
+  }
+  /** Opens the emoji picker next to `anchor`; onPick(id) receives the emoji id. */
+  function openPicker(anchor, onPick, { keepOpen = false, title = 'Emojis' } = {}) {
+    if (pickerState && pickerState.anchor === anchor) { closePicker(); return; }
+    closePicker();
+    const grid = el('div', { class: 'grid' });
+    const p = el('div', { class: 'picker' }, el('div', { class: 'ph-head' }, title), grid);
+    const add = (id) => grid.append(el('button', {
+      type: 'button', title: ':gd' + id + ':', html: emojiImg(id, ''),
+      onclick: () => { pushRecent(id); onPick(String(id)); if (!keepOpen) closePicker(); }
+    }));
+    const rec = recentEmojis();
+    if (rec.length) { grid.append(el('div', { class: 'sep' }, 'Recent')); rec.forEach(add); grid.append(el('div', { class: 'sep' }, 'All')); }
+    EMOJI_IDS.forEach(add);
+    grid.querySelectorAll('img').forEach(i => { i.loading = 'lazy'; });
+    document.body.append(p);
+    const r = anchor.getBoundingClientRect();
+    const pw = p.offsetWidth, ph = p.offsetHeight;
+    let top = r.top - ph - 8;
+    if (top < 8) top = Math.min(window.innerHeight - ph - 8, r.bottom + 8);
+    let left = Math.min(Math.max(8, r.left + r.width / 2 - pw / 2), window.innerWidth - pw - 8);
+    p.style.top = top + 'px'; p.style.left = left + 'px';
+    const outside = e => { if (!p.contains(e.target) && !anchor.contains(e.target)) closePicker(); };
+    document.addEventListener('pointerdown', outside, true);
+    pickerState = { el: p, anchor, outside };
+  }
+
+  // ---------- rich text ----------
+  const URL_RE = /(https?:\/\/[^\s<>"']+)/g;
+  function richHTML(text) {
+    const parts = String(text || '').split(URL_RE);
+    let out = '';
+    parts.forEach((part, i) => {
+      if (i % 2 === 1) {
+        const safe = esc(part);
+        out += `<a href="${safe}" target="_blank" rel="noopener noreferrer">${safe}</a>`;
+        return;
+      }
+      let h = esc(part);
+      h = h.replace(/:gd(\d{1,4}):/g, (m, id) => isEmoji(id) ? emojiImg(id) : m);
+      h = h.replace(/(^|[^A-Za-z0-9_])@([A-Za-z0-9_.-]{2,20})/g, (m, pre, n) => {
+        let name = n, tail = '';
+        while (name.length > 2 && /[.-]$/.test(name) && !userByName(name)) { tail = name.slice(-1) + tail; name = name.slice(0, -1); }
+        const id = userByName(name);
+        if (!id) return m;
+        return `${pre}<span class="mention${id === uid ? ' me' : ''}" data-uid="${id}">@${esc(S.users[id].name)}</span>${tail}`;
+      });
+      out += h;
+    });
+    return out;
+  }
+  function richEl(text, tag = 'div') {
+    const e = el(tag, { class: 'rich', html: richHTML(text) });
+    const stripped = String(text || '').replace(/:gd\d{1,4}:/g, '').trim();
+    const count = (String(text || '').match(/:gd\d{1,4}:/g) || []).length;
+    if (!stripped && count > 0 && count <= 3) e.classList.add('jumbo');
+    return e;
+  }
+  function mentionsMe(text) {
+    const m = me();
+    if (!m || !text) return false;
+    const re = new RegExp('(^|[^A-Za-z0-9_])@' + m.name.replace(/[.\-]/g, '\\$&') + '(?![A-Za-z0-9_])', 'i');
+    return re.test(text);
+  }
+  document.addEventListener('click', e => {
+    const m = e.target.closest && e.target.closest('.mention[data-uid]');
+    if (m) openUserCard(m.dataset.uid);
+  });
+
+  // ---------- avatar / name ----------
+  const FRAMES = [
+    ['none', 'None'], ['ring', 'Ring'], ['dashed', 'Dashed'], ['double', 'Double'], ['neon', 'Neon'],
+    ['gold', 'Gold'], ['rainbow', 'Rainbow'], ['orbit', 'Orbit'], ['glitch', 'Glitch']
+  ];
+  const EFFECTS = [
+    ['none', 'None'], ['glow', 'Glow'], ['shimmer', 'Shimmer'], ['rainbow', 'Rainbow'], ['neon', 'Neon'],
+    ['gold', 'Gold'], ['fire', 'Fire'], ['glitch', 'Glitch'], ['pulse', 'Pulse'], ['outline', 'Outline']
+  ];
+  const okFrame = f => FRAMES.some(x => x[0] === f) ? f : 'none';
+  const okEffect = f => EFFECTS.some(x => x[0] === f) ? f : 'none';
+  const safeImg = src => (typeof src === 'string' && (/^data:image\//.test(src) || /^https:\/\//.test(src))) ? src : null;
+
+  function avatarFrom(data, size = 40, onclick) {
+    const d = data || {};
+    const a = el('div', { class: 'av f-' + okFrame(d.frame), style: '--s:' + size + 'px' });
+    const src = safeImg(d.avatar);
+    if (src) a.append(el('img', { src, alt: '', loading: 'lazy', draggable: 'false' }));
+    else a.append(el('div', { class: 'ph' }, (d.name || '?').charAt(0)));
+    if (onclick) a.addEventListener('click', onclick);
+    return a;
+  }
+  function avatar(id, size = 40, clickable = true) {
+    return avatarFrom(S.users[id] || { name: '?' }, size, clickable ? (e) => { e.stopPropagation(); openUserCard(id); } : null);
+  }
+  function nameFrom(data, cls = '') {
+    const d = data || {};
+    return el('span', { class: 'uname fx-' + okEffect(d.effect) + ' ' + cls }, d.name || 'unknown');
+  }
+  function badges(id) {
+    const out = [];
+    const tag = staffTag(id);
+    if (tag === 'OWNER') out.push(el('span', { class: 'badge owner' }, 'OWNER'));
+    else if (tag === 'CO OWNER') out.push(el('span', { class: 'badge coowner' }, 'CO OWNER'));
+    else if (S.roles[id] === 'admin') out.push(el('span', { class: 'badge' }, 'ADMIN'));
+    return out;
+  }
+  function nameTag(id, withBadges = true) {
+    const u = user(id);
+    const wrap = el('span', { class: 'nametag' });
+    const n = nameFrom(u || { name: 'deleted user' });
+    if (u) n.addEventListener('click', e => { e.stopPropagation(); openUserCard(id); });
+    wrap.append(n);
+    if (withBadges && u) wrap.append(...badges(id));
+    return wrap;
+  }
+  /** Signature of everything about a user that affects how they render. */
+  function userSig(id) {
+    const u = S.users[id] || {};
+    return [u.name, u.avatar && u.avatar.length + u.avatar.slice(-24), u.effect, u.frame, isOwner(id), isAdmin(id)].join('|');
+  }
+
+  // ---------- uploads ----------
+  const EXT = {
+    image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif', 'ico', 'tif', 'tiff', 'heic', 'heif', 'apng', 'jfif'],
+    audio: ['mp3', 'wav', 'ogg', 'oga', 'm4a', 'aac', 'flac', 'opus', 'weba'],
+    video: ['mp4', 'webm', 'mov', 'm4v', 'mkv', 'ogv']
+  };
+  function kindOf(file) {
+    const t = (file.type || '').toLowerCase();
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    for (const k of ['image', 'audio', 'video']) if (t.startsWith(k + '/') || EXT[k].includes(ext)) return k;
+    return null;
+  }
+  const ACCEPT = 'image/*,audio/*,video/*,.mp3,.mp4,' + EXT.image.map(e => '.' + e).join(',');
+  const readDataURL = file => new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(file);
+  });
+  let storageWorks = null; // null = untested, true/false after first try
+
+  function storagePut(file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const safe = file.name.replace(/[^A-Za-z0-9._-]/g, '_').slice(-80);
+      const ref = storage.ref('uploads/' + uid + '/' + Date.now() + '_' + safe);
+      const task = ref.put(file, { contentType: file.type || undefined });
+      let stall = setTimeout(() => task.cancel(), 15000);
+      task.on('state_changed', s => {
+        clearTimeout(stall); stall = setTimeout(() => task.cancel(), 20000);
+        onProgress && onProgress(s.totalBytes ? s.bytesTransferred / s.totalBytes : 0);
+      }, err => { clearTimeout(stall); reject(err); }, async () => {
+        clearTimeout(stall);
+        try { resolve(await task.snapshot.ref.getDownloadURL()); } catch (e) { reject(e); }
+      });
+    });
+  }
+  /** Upload a file and return an attachment object {kind,name,type,size,url|fid}. */
+  async function upload(file, onProgress) {
+    const kind = kindOf(file);
+    if (!kind) throw new Error('Only images, audio (mp3…) and video (mp4…) can be attached');
+    const base = { kind, name: file.name.slice(0, 120), type: (file.type || '').slice(0, 60), size: file.size };
+    if (storage && storageWorks !== false && file.size <= STORAGE_FILE_MAX) {
+      try {
+        const url = await storagePut(file, onProgress);
+        storageWorks = true;
+        return Object.assign(base, { url });
+      } catch (e) {
+        console.warn('Orbit: Firebase Storage unavailable, using database fallback.', e);
+        if (storageWorks === true) throw new Error('Upload failed');
+        storageWorks = false;
+      }
+    }
+    if (file.size > DB_FILE_MAX) throw new Error('Files must be under ' + fmtSize(DB_FILE_MAX) + ' (enable Firebase Storage for bigger files)');
+    onProgress && onProgress(-1);
+    const data = await readDataURL(file);
+    const ref = db.ref('files').push();
+    await ref.set({ name: base.name, type: base.type, size: base.size, uid, ts: TS, data });
+    onProgress && onProgress(1);
+    return Object.assign(base, { fid: ref.key });
+  }
+
+  const fileCache = new Map();
+  function loadFile(fid) {
+    if (!fileCache.has(fid)) {
+      fileCache.set(fid, db.ref('files/' + fid + '/data').once('value').then(async s => {
+        const d = s.val();
+        if (typeof d !== 'string' || !/^data:(image|audio|video|application\/octet-stream)/.test(d)) throw new Error('missing');
+        try { return URL.createObjectURL(await (await fetch(d)).blob()); } catch (e) { return d; }
+      }));
+    }
+    return fileCache.get(fid);
+  }
+  const lazyIO = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+    entries.forEach(en => { if (en.isIntersecting) { lazyIO.unobserve(en.target); en.target._load && en.target._load(); } });
+  }, { rootMargin: '600px' }) : null;
+
+  function lightbox(src) {
+    const lb = el('div', { class: 'lightbox', onclick: () => lb.remove() }, el('img', { src, alt: '' }));
+    document.body.append(lb);
+  }
+  function attachmentEl(att) {
+    if (!att || !att.kind) return el('span');
+    const wrap = el('div', { class: 'att ' + att.kind });
+    const build = (src) => {
+      wrap.classList.remove('loading'); wrap.textContent = '';
+      if (att.kind === 'image') {
+        wrap.append(el('img', { src, alt: att.name || '', loading: 'lazy', onclick: () => lightbox(src) }));
+      } else if (att.kind === 'video') {
+        wrap.append(el('video', { src, controls: true, preload: 'metadata', playsinline: true }));
+      } else {
+        wrap.append(el('div', { class: 'fn', html: I.music.replace('<svg', '<svg width="15" height="15"') + esc(att.name || 'audio') }),
+          el('audio', { src, controls: true, preload: 'metadata' }));
+      }
+    };
+    if (att.url && /^https:\/\//.test(att.url)) build(att.url);
+    else if (att.fid) {
+      wrap.classList.add('loading'); wrap.textContent = 'Loading ' + att.kind + '…';
+      wrap._load = () => loadFile(att.fid).then(build).catch(() => { wrap.textContent = 'File unavailable'; });
+      if (lazyIO) lazyIO.observe(wrap); else wrap._load();
+    }
+    return wrap;
+  }
+  function attachmentsEl(list) {
+    const arr = Array.isArray(list) ? list : Object.values(list || {});
+    if (!arr.length) return null;
+    return el('div', { class: 'atts' }, arr.map(attachmentEl));
+  }
+  function deleteFiles(list) {
+    const arr = Array.isArray(list) ? list : Object.values(list || {});
+    arr.forEach(a => {
+      if (a && a.fid) db.ref('files/' + a.fid).remove().catch(() => {});
+      if (a && a.url && storage) { try { storage.refFromURL(a.url).delete().catch(() => {}); } catch (e) {} }
+    });
+  }
+
+  // ---------- reactions ----------
+  /** Renders reaction chips. path = db path of the `reactions` node. */
+  function reactionsEl(reactions, path, { allowAdd = true } = {}) {
+    const box = el('div', { class: 'reacts' });
+    const r = reactions || {};
+    const keys = Object.keys(r).filter(k => isEmoji(k) && r[k] && Object.keys(r[k]).length);
+    keys.forEach(k => {
+      const users = Object.keys(r[k]);
+      const mine = users.includes(uid);
+      const names = users.map(u => (user(u) || {}).name).filter(Boolean);
+      box.append(el('button', {
+        class: 'react' + (mine ? ' mine' : ''), type: 'button',
+        title: names.slice(0, 12).join(', ') + (names.length > 12 ? ' +' + (names.length - 12) : ''),
+        html: emojiImg(k, '') + '<span>' + users.length + '</span>',
+        onclick: () => toggleReaction(path, k)
+      }));
+    });
+    if (allowAdd && keys.length) {
+      const add = el('button', { class: 'react add', type: 'button', title: 'Add reaction', html: I.plus });
+      add.onclick = () => openPicker(add, id => toggleReaction(path, id), { title: 'React' });
+      box.append(add);
+    }
+    return keys.length ? box : null;
+  }
+  function toggleReaction(path, id) {
+    if (!canAct()) return;
+    const ref = db.ref(path + '/' + id + '/' + uid);
+    ref.once('value').then(s => s.exists() ? ref.remove() : ref.set(true));
+  }
+
+  // ---------- nav / chrome ----------
+  let chromeMounted = false;
+  function mountChrome(active) {
+    if (chromeMounted) return; chromeMounted = true;
+    const link = (href, key, icon, label) => el('a', { href, class: active === key ? 'active' : '', html: icon + `<span class="lbl">${label}</span>` });
+    const moreBtn = el('button', { type: 'button', class: active === 'more' ? 'active' : '', html: I.more + '<span class="lbl">More</span>' });
+    const dmLink = link('dms.html', 'dms', I.dm, 'DMs');
+    dmLink.classList.add('has-dot');
+    const dmDot = el('span', { class: 'nav-dot hidden' });
+    dmLink.append(dmDot);
+    const nav = el('nav', { class: 'nav' },
+      link('chat.html', 'chat', I.chat, 'Chat'),
+      dmLink,
+      link('post.html', 'posts', I.posts, 'Posts'),
+      moreBtn);
+    // unread DMs: a conversation is unread when its last activity is newer than my last read
+    let uc = {}, rd = {};
+    const paintDot = () => {
+      const n = Object.keys(uc).filter(c => (uc[c] || 0) > (rd[c] || 0)).length;
+      dmDot.classList.toggle('hidden', !n);
+      emit('unread', { userConvs: uc, reads: rd, count: n });
+    };
+    db.ref('userConvs/' + uid).on('value', s => { uc = s.val() || {}; paintDot(); });
+    db.ref('reads/' + uid).on('value', s => { rd = s.val() || {}; paintDot(); });
+
+    const menu = el('div', { class: 'more-menu' });
+    const item = (icon, label, fn) => el('button', { type: 'button', html: icon + esc(label), onclick: () => { menu.classList.remove('open'); fn(); } });
+    menu.append(
+      item(I.home, 'Home', () => { location.href = 'index.html'; }),
+      item(I.users, 'Members', openMembers),
+      item(I.user, 'Edit profile', () => openProfile({}))
+    );
+    moreBtn.onclick = (e) => { e.stopPropagation(); menu.classList.toggle('open'); };
+    document.addEventListener('pointerdown', e => { if (!menu.contains(e.target) && !moreBtn.contains(e.target)) menu.classList.remove('open'); });
+
+    const profBtn = el('button', { class: 'corner-btn right', type: 'button', 'aria-label': 'Profile', title: 'Profile' });
+    profBtn.onclick = () => openProfile({});
+    const adminBtn = el('button', { class: 'corner-btn left hidden', type: 'button', 'aria-label': 'Admin', title: 'Admin panel', html: I.shield + '<span class="tag">ADMIN</span>' });
+    adminBtn.onclick = () => openStaffPanel('admin');
+
+    document.body.append(nav, menu, profBtn, adminBtn);
+
+    let lastSig = '';
+    const refresh = () => {
+      const sig = userSig(uid) + '|' + !!me();
+      if (sig !== lastSig) {
+        lastSig = sig;
+        profBtn.innerHTML = '';
+        profBtn.append(me() ? avatarFrom(me(), 34) : el('span', { html: I.user, style: 'width:22px;height:22px;display:grid;color:var(--text-2)' }));
+        const a = profBtn.querySelector('.av'); if (a) a.style.pointerEvents = 'none';
+      }
+      adminBtn.classList.toggle('hidden', !(S.roles[uid] === 'admin' && !isOwner()));
+    };
+    on('change', refresh); refresh();
+  }
+
+  // ---------- ban / self state ----------
+  function selfCheck() {
+    const banned = isBanned();
+    let scr = $('.banscreen');
+    if (banned && !scr) {
+      scr = el('div', { class: 'banscreen' }, el('div', null,
+        el('h1', null, 'Banned'),
+        el('p', null, 'You have been banned from Orbit by the owner.'),
+        S.mod[uid] && S.mod[uid].reason ? el('p', { class: 'muted' }, 'Reason: ' + S.mod[uid].reason) : null));
+      document.body.append(scr);
+    } else if (!banned && scr) scr.remove();
+    if (isOwner() && ss.get('orbit_owner') !== '1') { /* owner on a new session — panel will ask password */ }
+  }
+
+  // ---------- profile panel ----------
+  async function processAvatar(file) {
+    if (kindOf(file) !== 'image') throw new Error('Pick an image file');
+    if (/gif/i.test(file.type) && file.size < 1048576) return readDataURL(file);
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('Could not read that image')); i.src = url; });
+      const S2 = 256, c = document.createElement('canvas'); c.width = c.height = S2;
+      const ctx = c.getContext('2d');
+      const sc = Math.max(S2 / img.naturalWidth, S2 / img.naturalHeight);
+      const w = img.naturalWidth * sc, h = img.naturalHeight * sc;
+      ctx.drawImage(img, (S2 - w) / 2, (S2 - h) / 2, w, h);
+      let out = c.toDataURL('image/webp', 0.86);
+      if (!out.startsWith('data:image/webp')) out = c.toDataURL('image/jpeg', 0.86);
+      return out;
+    } finally { URL.revokeObjectURL(url); }
+  }
+
+  async function saveProfile(target, data) {
+    const cur = S.users[target] || {};
+    const name = (data.name || '').trim();
+    if (!NAME_RE.test(name)) throw new Error('Nickname: 2–20 letters, numbers, _ . or -');
+    const k = nameKey(name);
+    if (STAFF_NAMES[name.toLowerCase()] && (!cur.name || nameKey(cur.name) !== k) && !ownerUnlocked()) {
+      const pw = await promptText({ title: '"' + name + '" is a reserved name', placeholder: 'Owner password', multiline: false, type: 'password', okLabel: 'Confirm' });
+      if (pw === null) throw new Error('Cancelled');
+      let ok = false;
+      try { ok = (await sha256(pw)) === OWNER_HASH; } catch (e) {}
+      if (!ok) throw new Error('Wrong password — that name is reserved');
+    }
+    if (!cur.name || nameKey(cur.name) !== k) {
+      const res = await db.ref('names/' + k).transaction(v => (v === null || v === target || !S.users[v] || !S.users[v].name) ? target : undefined);
+      if (!res.committed) throw new Error('That nickname is taken');
+      if (cur.name && nameKey(cur.name) !== k) db.ref('names/' + nameKey(cur.name)).remove().catch(() => {});
+    }
+    const upd = {
+      name, bio: (data.bio || '').slice(0, 160), effect: okEffect(data.effect), frame: okFrame(data.frame),
+      avatar: safeImg(data.avatar) || null, updatedAt: TS
+    };
+    if (!cur.createdAt) upd.createdAt = TS;
+    await db.ref('users/' + target).update(upd);
+  }
+
+  let profileOpen = null;
+  function openProfile({ target = uid, setup = false } = {}) {
+    if (profileOpen) { profileOpen.close(); if (target === uid && !setup) return; }
+    const editingOther = target !== uid;
+    if (editingOther && !ownerUnlocked()) { toast('Only the owner can edit other profiles', true); return; }
+    const cur = S.users[target] || {};
+    const isSetup = setup || !cur.name;
+    const draft = { name: cur.name || '', bio: cur.bio || '', effect: okEffect(cur.effect), frame: okFrame(cur.frame), avatar: cur.avatar || null };
+
+    const body = el('div');
+    const avWrap = el('div');
+    const nameShow = el('div');
+    const fileIn = el('input', { type: 'file', accept: 'image/*', class: 'hidden' });
+    const nameIn = el('input', { class: 'input', maxlength: 20, placeholder: 'nickname', value: draft.name, autocomplete: 'off', spellcheck: 'false' });
+    const bioIn = el('textarea', { class: 'textarea', maxlength: 160, rows: 2, placeholder: 'A short bio (optional)', style: 'min-height:60px' });
+    bioIn.value = draft.bio;
+    const effectChips = el('div', { class: 'chips' });
+    const frameChips = el('div', { class: 'chips' });
+
+    const paint = () => {
+      avWrap.innerHTML = ''; avWrap.append(avatarFrom(draft, 72));
+      nameShow.innerHTML = ''; nameShow.append(nameFrom({ name: draft.name || 'nickname', effect: draft.effect }));
+      if (!editingOther) nameShow.append(...badges(uid));
+      effectChips.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c.dataset.v === draft.effect));
+      frameChips.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c.dataset.v === draft.frame));
+    };
+    EFFECTS.forEach(([v, label]) => effectChips.append(el('button', { type: 'button', class: 'chip', 'data-v': v, onclick: () => { draft.effect = v; paint(); } },
+      el('span', { class: 'uname fx-' + v, style: 'pointer-events:none' }, label))));
+    FRAMES.forEach(([v, label]) => {
+      const c = el('button', { type: 'button', class: 'chip', 'data-v': v, onclick: () => { draft.frame = v; paint(); } });
+      const a = el('div', { class: 'av f-' + v, style: '--s:22px' }, el('div', { class: 'ph' }));
+      c.append(a, label); frameChips.append(c);
+    });
+
+    const upBtn = el('button', { type: 'button', class: 'btn sm' }, 'Upload photo');
+    const rmBtn = el('button', { type: 'button', class: 'btn sm ghost' }, 'Remove');
+    upBtn.onclick = () => fileIn.click();
+    rmBtn.onclick = () => { draft.avatar = null; paint(); };
+    fileIn.onchange = async () => {
+      const f = fileIn.files[0]; fileIn.value = '';
+      if (!f) return;
+      upBtn.disabled = true; upBtn.textContent = 'Processing…';
+      try { draft.avatar = await processAvatar(f); paint(); } catch (e) { toast(e.message, true); }
+      upBtn.disabled = false; upBtn.textContent = 'Upload photo';
+    };
+    nameIn.addEventListener('input', () => { draft.name = nameIn.value.trim(); paint(); });
+    bioIn.addEventListener('input', () => { draft.bio = bioIn.value; });
+
+    body.append(
+      el('div', { class: 'profile-hero' }, avWrap, el('div', { class: 'meta' }, nameShow,
+        el('div', { style: 'display:flex;gap:6px;margin-top:8px' }, upBtn, rmBtn), fileIn)),
+      el('label', { class: 'label' }, 'Nickname'), nameIn,
+      el('label', { class: 'label' }, 'Bio'), bioIn,
+      el('label', { class: 'label' }, 'Nickname effect'), effectChips,
+      el('label', { class: 'label' }, 'Profile frame'), frameChips
+    );
+
+    if (!editingOther && !isSetup) {
+      const code = el('div', { class: 'code-box' }, el('span', null, uid),
+        el('button', { class: 'btn sm', type: 'button', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(uid).then(() => toast('Login code copied')); } }, 'Copy'));
+      body.append(el('label', { class: 'label' }, 'Login code'),
+        el('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:6px' }, 'Orbit remembers you on this device. Use this code to sign in on another device — keep it private.'),
+        code);
+    }
+    if (isSetup && !editingOther) {
+      body.append(el('div', { style: 'margin-top:16px;font-size:13px' }, el('a', {
+        href: '#', class: 'muted', onclick: async (e) => {
+          e.preventDefault();
+          const code = await promptText({ title: 'Sign in with a login code', placeholder: 'Paste your login code', multiline: false, okLabel: 'Sign in' });
+          if (!code) return;
+          const c = code.trim();
+          if (!/^[A-Za-z0-9_-]{8,40}$/.test(c)) return toast('That code looks wrong', true);
+          const s = await db.ref('users/' + c + '/name').once('value');
+          if (!s.exists()) return toast('No profile found for that code', true);
+          ls.set('orbit_uid', c); location.reload();
+        }
+      }, 'Already have a profile? Sign in with a login code')));
+    }
+
+    const save = el('button', { class: 'btn primary', type: 'button' }, isSetup ? 'Create profile' : 'Save');
+    save.onclick = async () => {
+      save.disabled = true;
+      try {
+        await saveProfile(target, draft);
+        toast(isSetup ? 'Welcome to Orbit, ' + draft.name : 'Profile saved');
+        m.close();
+      } catch (e) { toast(e.message || 'Could not save', true); }
+      save.disabled = false;
+    };
+    nameIn.addEventListener('keydown', e => { if (e.key === 'Enter') save.click(); });
+
+    const m = modal({
+      title: editingOther ? 'Edit ' + (cur.name || 'profile') : isSetup ? 'Create your profile' : 'Your profile',
+      body, foot: [save], position: editingOther ? '' : 'bottom-right',
+      dismissable: !(isSetup && requireProfile && !editingOther),
+      onClose: () => { profileOpen = null; }
+    });
+    profileOpen = m;
+    paint();
+    setTimeout(() => nameIn.focus(), 50);
+  }
+
+  // ---------- user card & members ----------
+  function openUserCard(id) {
+    const u = user(id);
+    if (!u) return;
+    const body = el('div');
+    const meta = el('div', { class: 'meta' }, el('div', null, nameFrom(u), ...badges(id)),
+      el('div', { class: 'muted', style: 'font-size:13px;margin-top:4px' },
+        isOnline(id) ? el('span', null, el('span', { class: 'dot' }), ' online') : 'offline',
+        u.createdAt ? ' · joined ' + new Date(u.createdAt).toLocaleDateString(undefined, { month: 'short', year: 'numeric' }) : ''));
+    body.append(el('div', { class: 'profile-hero' }, avatarFrom(u, 72), meta));
+    if (u.bio) body.append(el('p', { style: 'color:var(--text-2);margin:16px 0 0;white-space:pre-wrap' }, u.bio));
+    const st = statusTags(id); if (st.length) body.append(el('div', { style: 'margin-top:10px' }, st));
+    const foot = [];
+    if (id !== uid) foot.push(el('button', { class: 'btn sm primary', html: I.dm.replace('<svg', '<svg width="15" height="15"') + 'Message', onclick: () => {
+      m.close();
+      if (!me()) return openProfile({ setup: true });
+      location.href = 'dms.html#u=' + encodeURIComponent(id);
+    } }));
+    if (handlers.mention && handlers.mention.length && id !== uid) foot.push(el('button', { class: 'btn sm', onclick: () => { m.close(); emit('mention', u.name); } }, 'Mention'));
+    if (id !== uid && canModerate(id)) {
+      foot.push(timeoutButton(id, () => m.close()));
+      if (ownerUnlocked()) foot.push(el('button', { class: 'btn sm', onclick: () => { m.close(); openProfile({ target: id }); } }, 'Edit'));
+    }
+    if (id === uid) foot.push(el('button', { class: 'btn sm', onclick: () => { m.close(); openProfile({}); } }, 'Edit profile'));
+    const m = modal({ title: 'Profile', body, foot: foot.length ? foot : null });
+  }
+  function statusTags(id) {
+    const out = [];
+    if (isBanned(id)) out.push(el('span', { class: 'status ban' }, 'BANNED'));
+    const t = timeoutLeft(id); if (t > 0) out.push(el('span', { class: 'status to' }, 'TIMED OUT · ' + fmtDur(t)));
+    return out;
+  }
+  function openMembers() {
+    const list = el('div');
+    const search = el('input', { class: 'input', placeholder: 'Search members', style: 'margin-bottom:12px' });
+    const render = () => {
+      const q = search.value.trim().toLowerCase();
+      const ids = Object.keys(S.users).filter(id => user(id) && (!q || user(id).name.toLowerCase().includes(q)))
+        .sort((a, b) => (isOnline(b) - isOnline(a)) || (isOwner(b) - isOwner(a)) || (isAdmin(b) - isAdmin(a)) || user(a).name.localeCompare(user(b).name));
+      list.innerHTML = '';
+      if (!ids.length) list.append(el('div', { class: 'empty' }, 'No members yet'));
+      ids.forEach(id => list.append(el('div', { class: 'mrow', style: 'cursor:pointer', onclick: () => openUserCard(id) },
+        avatar(id, 34, false),
+        el('div', { class: 'grow' }, nameTag(id), el('div', { class: 'sub' }, isOnline(id) ? '● online' : 'offline')))));
+    };
+    search.oninput = render;
+    const m = modal({ title: 'Members · ' + Object.keys(S.users).filter(id => user(id)).length, body: el('div', null, search, list), onClose: () => off() });
+    const off = (() => { const fn = () => render(); on('change', fn); return () => { handlers.change = handlers.change.filter(f => f !== fn); }; })();
+    render();
+  }
+
+  // ---------- direct messages & group chats ----------
+  const dmId = (a, b) => 'dm_' + [a, b].sort().join('_');
+  const dm = {
+    id: dmId,
+    /** Make sure a 1:1 DM with `other` exists and is in my list; returns its id. */
+    async ensure(other) {
+      const cid = dmId(uid, other);
+      const ref = db.ref('convs/' + cid);
+      const snap = await ref.once('value');
+      if (!snap.exists()) await ref.set({ type: 'dm', members: { [uid]: true, [other]: true }, createdAt: TS });
+      await db.ref('userConvs/' + uid + '/' + cid).set(TS);
+      return cid;
+    },
+    async createGroup(name, memberIds) {
+      const ref = db.ref('convs').push();
+      const members = { [uid]: true };
+      memberIds.forEach(m => { members[m] = true; });
+      const upd = {};
+      upd['convs/' + ref.key] = { type: 'group', name: name.slice(0, 40), members, createdBy: uid, createdAt: TS, last: { uid, text: 'created the group', ts: TS } };
+      Object.keys(members).forEach(m => { upd['userConvs/' + m + '/' + ref.key] = TS; });
+      upd['reads/' + uid + '/' + ref.key] = TS;
+      await db.ref().update(upd);
+      return ref.key;
+    },
+    /** Send a message into a DM / group and bump it in every member's list. */
+    async send(cid, msg) {
+      const meta = (await db.ref('convs/' + cid).once('value')).val();
+      if (!meta || !meta.members || !meta.members[uid]) throw new Error('You are not in this conversation');
+      const ref = db.ref('convMsgs/' + cid).push();
+      const preview = (msg.text || (msg.attachments ? '📎 Attachment' : msg.share ? '📝 Shared a post' : '')).replace(/:gd\d+:/g, '🙂').slice(0, 120);
+      const upd = {};
+      upd['convMsgs/' + cid + '/' + ref.key] = msg;
+      upd['convs/' + cid + '/last'] = { uid, text: preview, ts: TS };
+      Object.keys(meta.members).forEach(m => { upd['userConvs/' + m + '/' + cid] = TS; });
+      upd['reads/' + uid + '/' + cid] = TS;
+      await db.ref().update(upd);
+      return ref.key;
+    },
+    markRead(cid) { return db.ref('reads/' + uid + '/' + cid).set(TS); },
+    /** My conversations, newest first: [[cid, meta], ...] */
+    async listMine() {
+      const s = await db.ref('userConvs/' + uid).once('value');
+      const ids = Object.keys(s.val() || {});
+      const metas = await Promise.all(ids.map(c => db.ref('convs/' + c).once('value').then(x => [c, x.val()])));
+      return metas.filter(([, m]) => m && m.members && m.members[uid])
+        .sort((a, b) => (((b[1].last || {}).ts) || b[1].createdAt || 0) - (((a[1].last || {}).ts) || a[1].createdAt || 0));
+    },
+    other(meta) { return Object.keys((meta && meta.members) || {}).find(m => m !== uid) || uid; },
+    title(meta) {
+      if (!meta) return 'Conversation';
+      if (meta.type === 'group') return meta.name || 'Group chat';
+      return (user(dm.other(meta)) || {}).name || 'Deleted user';
+    }
+  };
+
+  // ---------- moderation actions ----------
+  function guard(target, ownerOnly) {
+    if (ownerOnly && !ownerUnlocked()) { toast('Owner only', true); return false; }
+    if (!canModerate(target)) { toast(isOwner(target) ? "You can't moderate the owner" : 'Not allowed', true); return false; }
+    return true;
+  }
+  const mod = {
+    async timeout(id, ms) { if (!guard(id)) return; await db.ref('mod/' + id).update({ timeoutUntil: now() + ms, by: uid }); toast((user(id) || {}).name + ' timed out for ' + fmtDur(ms)); },
+    async untimeout(id) { if (!guard(id)) return; await db.ref('mod/' + id + '/timeoutUntil').set(0); toast('Timeout removed'); },
+    async ban(id) {
+      if (!guard(id, true)) return;
+      const reason = await promptText({ title: 'Ban ' + ((user(id) || {}).name || 'user'), placeholder: 'Reason (optional)', multiline: false, okLabel: 'Ban' });
+      if (reason === null) return;
+      await db.ref('mod/' + id).update({ banned: true, reason: reason.slice(0, 200) || null, by: uid }); toast('User banned');
+    },
+    async unban(id) { if (!guard(id, true)) return; await db.ref('mod/' + id).update({ banned: null, reason: null }); toast('User unbanned'); },
+    async setAdmin(id, v) { if (!guard(id, true)) return; await db.ref('roles/' + id).set(v ? 'admin' : null); toast(v ? 'Admin granted' : 'Admin removed'); },
+    async deleteUser(id) {
+      if (!guard(id, true)) return;
+      const u = user(id);
+      if (!(await confirmBox('Delete the profile of ' + (u ? u.name : 'this user') + '? Their messages and posts stay unless you remove them.', 'Delete profile', true))) return;
+      const upd = {}; upd['users/' + id] = null; upd['roles/' + id] = null;
+      if (u) upd['names/' + nameKey(u.name)] = null;
+      await db.ref().update(upd); toast('Profile deleted');
+    },
+    async editMessage(id, msg, base = 'messages') {
+      if (!(msg.uid === uid || guard(msg.uid))) return;
+      const t = await promptText({ title: 'Edit message', value: msg.text || '' });
+      if (t === null) return;
+      await db.ref(base + '/' + id).update({ text: t.slice(0, 4000), edited: true, editedBy: uid });
+    },
+    async deleteMessage(id, msg, skipConfirm, base = 'messages') {
+      if (!(msg.uid === uid || guard(msg.uid))) return;
+      if (!skipConfirm && !(await confirmBox('Delete this message?', 'Delete', true))) return;
+      await db.ref(base + '/' + id).remove(); deleteFiles(msg.attachments);
+    },
+    async editPost(id, post) {
+      if (!(post.uid === uid || guard(post.uid))) return;
+      const t = await promptText({ title: 'Edit post', value: post.text || '' });
+      if (t === null) return;
+      await db.ref('posts/' + id).update({ text: t.slice(0, 5000), edited: true, editedBy: uid });
+    },
+    async deletePost(id, post) {
+      if (!(post.uid === uid || guard(post.uid))) return;
+      if (!(await confirmBox('Delete this post and its comments?', 'Delete', true))) return;
+      await db.ref().update({ ['posts/' + id]: null, ['comments/' + id]: null }); deleteFiles(post.attachments);
+    },
+    async deleteComment(postId, cid, c) {
+      if (!(c.uid === uid || guard(c.uid))) return;
+      if (!(await confirmBox('Delete this comment?', 'Delete', true))) return;
+      await db.ref('comments/' + postId + '/' + cid).remove();
+      db.ref('posts/' + postId + '/commentCount').transaction(n => Math.max(0, (n || 1) - 1));
+    }
+  };
+  function timeoutButton(id, after) {
+    const t = timeoutLeft(id) > 0;
+    return el('button', {
+      class: 'btn sm', html: I.clock.replace('<svg', '<svg width="15" height="15"') + (t ? 'Remove timeout' : 'Timeout'),
+      onclick: async () => {
+        if (t) await mod.untimeout(id);
+        else { const ms = await chooseDuration((user(id) || {}).name); if (ms) await mod.timeout(id, ms); }
+        after && after();
+      }
+    });
+  }
+
+  // ---------- owner key + panels ----------
+  const isEditable = t => t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  document.addEventListener('keydown', e => {
+    if ((e.key === '`' || e.key === '~') && !isEditable(e.target) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      openOwnerGate();
+    }
+  });
+  let gateOpen = false;
+  async function openOwnerGate() {
+    if (gateOpen || $('.backdrop.staff-owner')) return;
+    await ready;
+    if (ownerUnlocked()) return openStaffPanel('owner');
+    gateOpen = true;
+    const input = el('input', { class: 'input', type: 'password', placeholder: 'Owner password', autocomplete: 'off' });
+    const go = el('button', { class: 'btn primary' }, 'Unlock');
+    const m = modal({ title: 'Owner panel', body: el('div', null, el('div', { class: 'muted', style: 'font-size:13px;margin-bottom:10px', html: I.lock.replace('<svg', '<svg width="14" height="14" style="vertical-align:-2px"') + ' Enter the owner password' }), input), foot: [go], onClose: () => { gateOpen = false; } });
+    const attempt = async () => {
+      let hash = '';
+      try { hash = await sha256(input.value); } catch (e) { toast('Open Orbit over https or localhost to use the owner panel', true); return; }
+      if (hash !== OWNER_HASH) { input.value = ''; input.focus(); toast('Wrong password', true); return; }
+      await db.ref('owners/' + uid).set(true);
+      S.owners[uid] = true;
+      ss.set('orbit_owner', '1');
+      m.close();
+      toast('Owner panel unlocked');
+      openStaffPanel('owner');
+    };
+    go.onclick = attempt;
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') attempt(); });
+    setTimeout(() => input.focus(), 40);
+  }
+
+  function openStaffPanel(mode) {
+    const owner = mode === 'owner';
+    if (owner && !ownerUnlocked()) return openOwnerGate();
+    if (!owner && !isAdmin()) return toast('Admins only', true);
+    const existing = $('.backdrop.staff-' + mode); if (existing) return;
+
+    const tabsEl = el('div', { class: 'tabs' });
+    const content = el('div');
+    const tabNames = ['Users', 'Chat', 'Posts'];
+    let tab = 'Users';
+    const detach = [];
+    const cleanup = () => { detach.splice(0).forEach(fn => fn()); };
+
+    tabNames.forEach(t => tabsEl.append(el('button', { type: 'button', 'data-t': t, onclick: () => { tab = t; showTab(); } }, t)));
+
+    const foot = [];
+    if (owner) {
+      foot.push(el('button', { class: 'btn sm ghost', onclick: () => { ss.del('orbit_owner'); m.close(); toast('Owner panel locked'); } }, 'Lock panel'));
+    }
+    const m = modal({
+      title: owner ? 'Owner panel' : 'Admin panel', wide: true, cls: 'staff-' + mode,
+      position: owner ? '' : 'bottom-left',
+      body: el('div', null, tabsEl, content), foot: foot.length ? foot : null,
+      onClose: cleanup
+    });
+    m.head.querySelector('h3').prepend(el('span', { html: (owner ? I.crown : I.shield).replace('<svg', '<svg width="17" height="17" style="vertical-align:-3px;margin-right:8px"') }));
+
+    function showTab() {
+      cleanup();
+      tabsEl.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
+      content.innerHTML = '';
+      if (tab === 'Users') usersTab();
+      if (tab === 'Chat') chatTab();
+      if (tab === 'Posts') postsTab();
+    }
+
+    function protectedTag() { return el('span', { class: 'sub' }, 'Protected'); }
+
+    function usersTab() {
+      const search = el('input', { class: 'input', placeholder: 'Search users', style: 'margin-bottom:12px' });
+      const list = el('div');
+      content.append(search, list);
+      const render = () => {
+        const q = search.value.trim().toLowerCase();
+        const ids = Object.keys(S.users).filter(id => user(id) && (!q || user(id).name.toLowerCase().includes(q)))
+          .sort((a, b) => (isOwner(b) - isOwner(a)) || (isAdmin(b) - isAdmin(a)) || user(a).name.localeCompare(user(b).name));
+        list.innerHTML = '';
+        if (!ids.length) list.append(el('div', { class: 'empty' }, 'No users yet'));
+        ids.forEach(id => {
+          const acts = el('div', { class: 'acts' });
+          const self = id === uid;
+          if (!canModerate(id) || (self && !owner)) acts.append(protectedTag());
+          else if (owner) {
+            acts.append(el('button', { class: 'btn sm', onclick: () => openProfile({ target: id }) }, 'Edit'));
+            if (!self) {
+              acts.append(el('button', { class: 'btn sm', onclick: () => mod.setAdmin(id, S.roles[id] !== 'admin') }, S.roles[id] === 'admin' ? 'Remove admin' : 'Make admin'));
+              acts.append(timeoutButton(id));
+              acts.append(isBanned(id)
+                ? el('button', { class: 'btn sm', onclick: () => mod.unban(id) }, 'Unban')
+                : el('button', { class: 'btn sm danger', onclick: () => mod.ban(id) }, 'Ban'));
+              acts.append(el('button', { class: 'btn sm danger', html: I.trash.replace('<svg', '<svg width="15" height="15"'), title: 'Delete profile', onclick: () => mod.deleteUser(id) }));
+            }
+          } else {
+            acts.append(timeoutButton(id));
+          }
+          list.append(el('div', { class: 'mrow' }, avatar(id, 34, false),
+            el('div', { class: 'grow' }, el('div', null, nameTag(id), ...statusTags(id)),
+              el('div', { class: 'sub' }, (isOnline(id) ? '● online' : 'offline') + (owner ? ' · ' + id : ''))),
+            acts));
+        });
+      };
+      search.oninput = render;
+      const fn = () => { if (document.activeElement && list.contains(document.activeElement)) return; render(); };
+      on('change', fn); detach.push(() => { handlers.change = handlers.change.filter(f => f !== fn); });
+      const tick = setInterval(render, 15000); detach.push(() => clearInterval(tick));
+      render();
+    }
+
+    function chatTab() {
+      const list = el('div');
+      if (owner) {
+        content.append(el('div', { style: 'display:flex;justify-content:flex-end;margin-bottom:10px' },
+          el('button', {
+            class: 'btn sm danger', onclick: async () => {
+              if (!(await confirmBox('Delete every chat message? This cannot be undone.', 'Clear chat', true))) return;
+              await db.ref('messages').remove(); toast('Chat cleared');
+            }
+          }, 'Clear all chat')));
+      }
+      content.append(list);
+      const ref = db.ref('messages').limitToLast(150);
+      const cb = ref.on('value', snap => {
+        const items = []; snap.forEach(c => { items.push([c.key, c.val()]); });
+        items.reverse();
+        list.innerHTML = '';
+        if (!items.length) list.append(el('div', { class: 'empty' }, 'No messages'));
+        items.forEach(([id, msg]) => {
+          const allowed = canModerate(msg.uid);
+          const preview = (msg.text || '').trim() || (msg.attachments ? '[attachment]' : msg.share ? '[shared post]' : '');
+          list.append(el('div', { class: 'mrow' }, avatar(msg.uid, 30, false),
+            el('div', { class: 'grow' }, el('div', null, nameTag(msg.uid), el('span', { class: 'sub' }, ' · ' + clock(msg.ts || 0) + (msg.edited ? ' · edited' : ''))),
+              el('div', { class: 'txt', title: msg.text || '' }, preview)),
+            el('div', { class: 'acts' }, allowed ? [
+              el('button', { class: 'btn sm', onclick: () => mod.editMessage(id, msg) }, 'Edit'),
+              el('button', { class: 'btn sm danger', onclick: () => mod.deleteMessage(id, msg) }, 'Delete'),
+              msg.uid !== uid ? timeoutButton(msg.uid) : null
+            ] : protectedTag())));
+        });
+      });
+      detach.push(() => ref.off('value', cb));
+    }
+
+    function postsTab() {
+      const list = el('div');
+      content.append(list);
+      const ref = db.ref('posts').limitToLast(100);
+      const cb = ref.on('value', snap => {
+        const items = []; snap.forEach(c => { items.push([c.key, c.val()]); });
+        items.reverse();
+        list.innerHTML = '';
+        if (!items.length) list.append(el('div', { class: 'empty' }, 'No posts'));
+        items.forEach(([id, post]) => {
+          const allowed = canModerate(post.uid);
+          const cbox = el('div', { class: 'hidden', style: 'margin:-4px 0 10px 44px' });
+          const row = el('div', { class: 'mrow' }, avatar(post.uid, 30, false),
+            el('div', { class: 'grow' }, el('div', null, nameTag(post.uid), el('span', { class: 'sub' }, ' · ' + clock(post.ts || 0) + ' · ' + (post.commentCount || 0) + ' comments')),
+              el('div', { class: 'txt', title: post.text || '' }, (post.title ? post.title + ' — ' : '') + ((post.text || '').trim() || (post.title ? '' : '[media]')))),
+            el('div', { class: 'acts' },
+              el('button', { class: 'btn sm', onclick: () => toggleComments(id, cbox) }, 'Comments'),
+              allowed ? [
+                el('button', { class: 'btn sm', onclick: () => mod.editPost(id, post) }, 'Edit'),
+                el('button', { class: 'btn sm danger', onclick: () => mod.deletePost(id, post) }, 'Delete')
+              ] : protectedTag()));
+          list.append(row, cbox);
+        });
+      });
+      detach.push(() => ref.off('value', cb));
+    }
+    function toggleComments(postId, box) {
+      if (!box.classList.contains('hidden')) { box.classList.add('hidden'); box._off && box._off(); return; }
+      box.classList.remove('hidden');
+      const ref = db.ref('comments/' + postId);
+      const cb = ref.on('value', snap => {
+        box.innerHTML = '';
+        if (!snap.exists()) box.append(el('div', { class: 'sub', style: 'padding:6px' }, 'No comments'));
+        snap.forEach(c => {
+          const cm = c.val();
+          box.append(el('div', { class: 'mrow' }, avatar(cm.uid, 24, false),
+            el('div', { class: 'grow' }, nameTag(cm.uid), el('div', { class: 'txt' }, cm.text || '')),
+            el('div', { class: 'acts' }, canModerate(cm.uid) ? el('button', { class: 'btn sm danger', onclick: () => mod.deleteComment(postId, c.key, cm) }, 'Delete') : protectedTag())));
+        });
+      });
+      box._off = () => ref.off('value', cb);
+      detach.push(box._off);
+    }
+    showTab();
+  }
+
+  // ---------- init ----------
+  let requireProfile = false;
+  async function init({ page, require = false } = {}) {
+    requireProfile = require;
+    mountChrome(page);
+    await ready;
+    if (require && !me()) openProfile({ setup: true });
+  }
+
+  window.Orbit = {
+    db, TS, now, uid, S, I, el, esc, $, ls,
+    on, off, emit, ready, init, dm, staffTag,
+    me, user, isOwner, isAdmin, ownerUnlocked, isBanned, timeoutLeft, isOnline, userByName, canModerate, canAct,
+    toast, modal, confirmBox, promptText, chooseDuration,
+    EMOJI_IDS, isEmoji, emojiUrl, emojiImg, openPicker, closePicker,
+    richEl, richHTML, mentionsMe,
+    avatar, avatarFrom, nameTag, nameFrom, badges, userSig,
+    upload, kindOf, ACCEPT, attachmentEl, attachmentsEl, deleteFiles, fmtSize, fmtDur,
+    reactionsEl, toggleReaction,
+    openProfile, openUserCard, openMembers, openStaffPanel, mod, timeoutButton,
+    timeAgo, clock
+  };
+})();
