@@ -32,7 +32,7 @@
   // sha256("tokoolkoala")
   const OWNER_HASH = '9836a25f7d02c52e66faf055ae73b36ed70d99f959310953851ef68f63e827c7';
   // Name-based staff tags. These nicknames are reserved: taking one needs the owner password.
-  const STAFF_NAMES = { omere: 'OWNER', ooze34: 'OWNER', ome: 'OWNER' };
+  const STAFF_NAMES = { omere: 'OWNER', ooze34: 'OWNER', ome: 'OWNER', orbit: 'OWNER' };
   const DB_FILE_MAX = 9.5 * 1024 * 1024;     // fallback (Realtime Database) upload cap
   const STORAGE_FILE_MAX = 50 * 1024 * 1024; // Firebase Storage upload cap
 
