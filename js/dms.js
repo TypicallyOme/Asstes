@@ -1,12 +1,10 @@
-/* ============================================================
-   ORBIT — DMs and group chats
-   ============================================================ */
 (function () {
   'use strict';
   const O = window.Orbit;
   const { db, TS, el, I, uid } = O;
 
   O.init({ page: 'dms', require: true });
+  O.$('#messageTools').replaceWith(O.messageTools());
 
   const layout = O.$('#layout'), convList = O.$('#convList'), peopleList = O.$('#peopleList');
   const sideSearch = O.$('#sideSearch'), head = O.$('#dmHead'), convoEl = O.$('#convo'), emptyEl = O.$('#dmEmpty');
@@ -15,7 +13,6 @@
   O.$('#newGroupBtn').onclick = () => groupPicker();
   O.$('#emptyGroupBtn').onclick = () => groupPicker();
 
-  // ---------- my conversations (live) ----------
   const metas = new Map();     // cid -> meta
   const metaRefs = new Map();  // cid -> unsubscribe
   let userConvs = {}, reads = {};
@@ -68,7 +65,6 @@
 
   function drawSide() {
     const q = sideSearch.value.trim().toLowerCase();
-    // chats
     const convs = [...metas.entries()]
       .filter(([cid, m]) => !q || O.dm.title(m).toLowerCase().includes(q) || memberNames(m).includes(q))
       .sort((a, b) => lastTs(b[1]) - lastTs(a[1]));
@@ -87,7 +83,6 @@
       if (m.type !== 'group' && O.isOnline(O.dm.other(m))) row.append(el('span', { class: 'online' }));
       convList.append(row);
     });
-    // people
     const people = Object.keys(O.S.users)
       .filter(id => id !== uid && O.user(id) && (!q || O.user(id).name.toLowerCase().includes(q)))
       .sort((a, b) => (O.isOnline(b) - O.isOnline(a)) || O.user(a).name.localeCompare(O.user(b).name));
@@ -104,7 +99,6 @@
     });
   }
 
-  // ---------- open / close ----------
   async function openDM(other) {
     if (!O.me()) return O.openProfile({ setup: true });
     if (other === uid || !O.user(other)) return O.toast('That person was not found', true);
@@ -135,7 +129,7 @@
       placeholder: meta.type === 'group' ? 'Message ' + (meta.name || 'the group') : 'Message ' + O.dm.title(meta),
       emptyText: meta.type === 'group' ? 'This is the start of ' + (meta.name || 'the group') + '.' : 'This is the start of your DM with ' + O.dm.title(meta) + '.',
       members: () => Object.keys((metas.get(cid) || {}).members || {}),
-      send: msg => O.dm.send(cid, msg),
+      send: msg => O.dm.send(cid, msg, { silentSound: true }),
       onActivity: () => { if (activeCid === cid && document.visibilityState === 'visible') O.dm.markRead(cid); },
       searchBtn
     });
@@ -155,7 +149,6 @@
     schedule();
   }
 
-  // ---------- header ----------
   let menuEl = null;
   function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
   document.addEventListener('pointerdown', e => { if (menuEl && !menuEl.contains(e.target) && !e.target.closest('.hmenu')) closeMenu(); });
@@ -222,7 +215,6 @@
     const m = O.modal({ title: (meta.name || 'Group') + ' · members', body: list });
   }
 
-  // ---------- new group / add people ----------
   function groupPicker(addToCid) {
     if (!O.me()) return O.openProfile({ setup: true });
     const existing = addToCid ? Object.keys((metas.get(addToCid) || {}).members || {}) : [];
@@ -269,7 +261,6 @@
     setTimeout(() => (addToCid ? search : nameIn).focus(), 40);
   }
 
-  // ---------- deep links: #u=<uid> opens a DM, #c=<cid> opens a chat ----------
   async function handleHash() {
     await O.ready;
     const u = location.hash.match(/u=([A-Za-z0-9_-]+)/);

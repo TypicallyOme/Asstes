@@ -1,4 +1,3 @@
-/* Orbit Archive: community boxes and iframe viewer. */
 (function () {
   'use strict';
   const O = window.Orbit;

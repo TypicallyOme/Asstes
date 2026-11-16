@@ -1,4 +1,3 @@
-/* Orbit Groups: public communities with joined community chats. */
 (function () {
   'use strict';
   const O = window.Orbit;

@@ -1,9 +1,3 @@
-/* ============================================================
-   ORBIT — conversation view
-   One engine for the main chat, DMs and group chats:
-   messages, replies, reactions, attachments, emojis,
-   mentions, typing indicator, search and moderation.
-   ============================================================ */
 (function () {
   'use strict';
   const O = window.Orbit;
@@ -31,7 +25,6 @@
     const every = (fn, ms) => { const t = setInterval(fn, ms); cleanups.push(() => clearInterval(t)); };
     const docOn = (type, fn, cap) => { document.addEventListener(type, fn, cap); cleanups.push(() => document.removeEventListener(type, fn, cap)); };
 
-    // ---------- DOM ----------
     const list = el('div');
     const olderBtn = el('button', { class: 'btn sm', type: 'button' }, 'Load earlier messages');
     const olderWrap = el('div', { class: 'older hidden' }, olderBtn);
@@ -54,7 +47,6 @@
     opts.mount.innerHTML = '';
     opts.mount.append(feed, area);
 
-    // ---------- state ----------
     const msgs = new Map();
     const nodes = new Map();
     let limit = 200, query = null, initialLoaded = false, stick = true;
@@ -70,7 +62,8 @@
         const m = s.val(); if (!m) return;
         msgs.set(s.key, m);
         if (initialLoaded && m.uid !== uid) {
-          if (O.mentionsMe(m.text)) { const n = O.user(m.uid); O.toast((n ? n.name : 'Someone') + ' mentioned you'); }
+          if (opts.onIncoming) opts.onIncoming(m, s.key);
+          if (!opts.anonymous && O.mentionsMe(m.text)) { const n = O.user(m.uid); O.toast((n ? n.name : 'Someone') + ' mentioned you'); }
           opts.onActivity && opts.onActivity();
         }
         schedule();
@@ -88,7 +81,6 @@
     cleanups.push(() => { if (query) query.off(); });
     olderBtn.onclick = () => { pendingScrollTo = [...msgs.keys()][0]; limit += 200; subscribe(); };
 
-    // ---------- render ----------
     let scheduled = false, forceBottom = false;
     function schedule(bottom) {
       if (bottom) forceBottom = true;
@@ -106,7 +98,7 @@
       let prev = null;
       ids.forEach(id => {
         const m = msgs.get(id);
-        const grouped = !!(prev && prev.uid === m.uid && !prev.forward && !m.replyTo && !m.share && !m.forward && (m.ts - prev.ts) < 5 * 60e3);
+        const grouped = !opts.anonymous && !!(prev && prev.uid === m.uid && !prev.forward && !m.replyTo && !m.share && !m.forward && (m.ts - prev.ts) < 5 * 60e3);
         const sig = JSON.stringify(m) + '§' + O.userSig(m.uid) + '§' + grouped + '§' + O.canModerate(m.uid) + '§' +
           (m.replyTo ? O.userSig(m.replyTo.uid) : '') + '§' + (m.forward ? O.userSig(m.forward.uid) : '') + '§' + (/@/.test(m.text || '') ? ns + (O.me() || {}).name : '');
         const cached = nodes.get(id);
@@ -135,22 +127,22 @@
     }
 
     function buildMsg(id, m, grouped) {
-      const mentioned = m.uid !== uid && O.mentionsMe(m.text);
+      const mentioned = !opts.anonymous && m.uid !== uid && O.mentionsMe(m.text);
       const node = el('div', { class: 'msg' + (grouped ? ' grouped' : '') + (mentioned ? ' mentioned' : ''), 'data-id': id });
       const gutter = el('div', { class: 'gutter' });
       if (grouped) gutter.append(el('span', { class: 'gt' }, new Date(m.ts || 0).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })));
-      else gutter.append(O.avatar(m.uid, 40));
+      else gutter.append(authorAvatar(m.uid, 40));
       const body = el('div', { class: 'mbody' });
       if (m.replyTo && m.replyTo.id) {
         const ru = O.user(m.replyTo.uid);
         body.append(el('div', { class: 'reply-ref', onclick: () => jumpTo(m.replyTo.id) },
-          O.avatar(m.replyTo.uid, 16, false), O.nameFrom(ru || { name: 'unknown' }),
+          authorAvatar(m.replyTo.uid, 16, false, !!m.replyTo.anonymous), authorName(ru || { name: 'unknown' }, !!m.replyTo.anonymous),
           el('span', { class: 'rt' }, (m.replyTo.text || '').replace(/:gd\d+:/g, '🙂') || '[attachment]')));
       }
-      if (!grouped) body.append(el('div', { class: 'mhead' }, O.nameTag(m.uid),
+      if (!grouped) body.append(el('div', { class: 'mhead' }, authorTag(m.uid),
         el('span', { class: 'time', title: new Date(m.ts || 0).toLocaleString() }, O.clock(m.ts || 0))));
       if (m.text) {
-        const t = O.richEl(m.text);
+        const t = displayRich(m.text);
         if (m.edited) t.append(el('span', { class: 'edited' }, m.editedBy && m.editedBy !== m.uid ? '(edited by mod)' : '(edited)'));
         body.append(t);
       }
@@ -175,7 +167,7 @@
       }
       if (canMod) act(I.clock, 'Time out user', async () => {
         if (O.timeoutLeft(m.uid) > 0) return O.mod.untimeout(m.uid);
-        const ms = await O.chooseDuration((O.user(m.uid) || {}).name); if (ms) O.mod.timeout(m.uid, ms);
+        const ms = await O.chooseDuration(opts.anonymous ? 'Anonymous' : (O.user(m.uid) || {}).name); if (ms) O.mod.timeout(m.uid, ms);
       });
       node.append(gutter, body, acts);
       node.addEventListener('click', e => {
@@ -188,6 +180,23 @@
       return node;
     }
 
+    function anonymousAvatar(size) {
+      const person = '<svg viewBox="0 0 24 24" width="55%" height="55%" aria-hidden="true"><circle cx="12" cy="8" r="4" fill="currentColor"/><path d="M4 21a8 8 0 0 1 16 0" fill="currentColor"/></svg>';
+      return el('div', { class: 'av anonymous-avatar', style: '--s:' + size + 'px', title: 'Anonymous', 'aria-label': 'Anonymous' }, el('span', { class: 'ph', html: person }));
+    }
+    function authorAvatar(id, size, clickable, anonymous) { return opts.anonymous || anonymous ? anonymousAvatar(size) : O.avatar(id, size, clickable); }
+    function authorName(data, anonymous) { return opts.anonymous || anonymous ? el('span', { class: 'uname anonymous-name' }, 'Anonymous') : O.nameFrom(data); }
+    function authorTag(id, anonymous) { return opts.anonymous || anonymous ? el('span', { class: 'uname anonymous-name' }, 'Anonymous') : O.nameTag(id); }
+    function displayRich(text, tag, anonymous = opts.anonymous) {
+      const content = O.richEl(text, tag);
+      if (anonymous) content.querySelectorAll('.mention[data-uid]').forEach(node => {
+        node.textContent = '@Anonymous';
+        node.classList.remove('mention', 'me');
+        node.removeAttribute('data-uid');
+      });
+      return content;
+    }
+
     function shareCard(sh) {
       const archive = sh.type === 'archive';
       const community = sh.type === 'community';
@@ -198,16 +207,16 @@
       const card = el('a', { class: 'share-card', href },
         el('div', { class: 'sc-head', html: icon.replace('<svg', '<svg width="14" height="14"') + ' ' + kind + ' by ' }),
         sh.title ? el('div', { class: 'sc-title' }, sh.title) : null,
-        el('div', { class: 'sc-text' }, O.richEl(copy, 'span')),
+        el('div', { class: 'sc-text' }, displayRich(copy, 'span', opts.anonymous || !!sh.anonymous)),
         el('div', { class: 'sc-open' }, community ? 'Open community →' : archive ? 'Open Archive box →' : 'Open post →'));
-      card.querySelector('.sc-head').append(O.nameFrom(O.user(sh.uid) || { name: 'unknown' }));
+      card.querySelector('.sc-head').append(authorName(O.user(sh.uid) || { name: 'unknown' }, !!sh.anonymous));
       return card;
     }
 
     function forwardCard(forward) {
       const box = el('div', { class: 'forward-card' },
-        el('div', { class: 'forward-label' }, 'Forwarded from ', O.nameTag(forward.uid || '')));
-      if (forward.text) box.append(O.richEl(forward.text));
+        el('div', { class: 'forward-label' }, 'Forwarded from ', authorTag(forward.uid || '', !!forward.anonymous)));
+      if (forward.text) box.append(displayRich(forward.text, undefined, opts.anonymous || !!forward.anonymous));
       const atts = O.attachmentsEl(forward.attachments); if (atts) box.append(atts);
       if (forward.share && forward.share.id) box.append(shareCard(forward.share));
       if (!forward.text && !atts && !forward.share) box.append(el('span', { class: 'muted' }, '[message]'));
@@ -218,9 +227,10 @@
       if (!O.canAct()) return;
       const note = el('textarea', { class: 'textarea', rows: 2, placeholder: 'Add a message (optional)', maxlength: 1000, style: 'min-height:60px' });
       const original = message.forward || message;
+      const anonymousSource = !!(opts.anonymous || original.anonymous);
       const preview = el('div', { class: 'forward-preview' },
-        el('div', { class: 'forward-label' }, 'Forward from ', O.nameTag(original.uid || message.uid)),
-        original.text ? O.richEl(original.text) : null,
+        el('div', { class: 'forward-label' }, 'Forward from ', authorTag(original.uid || message.uid, anonymousSource)),
+        original.text ? displayRich(original.text, undefined, anonymousSource) : null,
         original.attachments ? el('div', { class: 'muted' }, 'Message includes attachments') : null,
         original.share ? el('div', { class: 'muted' }, 'Message includes a shared item') : null);
       const search = el('input', { class: 'input', placeholder: 'Search DMs or people' });
@@ -253,9 +263,9 @@
         if (!O.canAct()) return;
         if (!dest) return O.toast('Choose a DM first', true);
         sendBtn.disabled = true;
-        const forwarded = { uid: original.uid || message.uid, text: String(original.text || '').slice(0, 4000), ts: Number(original.ts || message.ts) || O.TS };
+        const forwarded = { uid: anonymousSource ? null : (original.uid || message.uid), anonymous: anonymousSource || null, text: String(original.text || '').slice(0, 4000), ts: Number(original.ts || message.ts) || O.TS };
         if (original.attachments) forwarded.attachments = original.attachments;
-        if (original.share) forwarded.share = original.share;
+        if (original.share) forwarded.share = { ...original.share, anonymous: anonymousSource || !!original.share.anonymous };
         const outgoing = { uid, text: note.value.trim().slice(0, 1000), ts: O.TS, forward: forwarded };
         try {
           const cid = dest.type === 'person' ? await O.dm.ensure(dest.id) : dest.id;
@@ -283,7 +293,6 @@
       ro.observe(list); cleanups.push(() => ro.disconnect());
     }
 
-    // ---------- search ----------
     let searchPanel = null, searchCache = null, searchCacheAt = 0;
     async function searchSource() {
       if (searchCache && Date.now() - searchCacheAt < 15000) return searchCache;
@@ -294,7 +303,7 @@
     }
     const sTerms = q => q.toLowerCase().split(/\s+/).filter(Boolean);
     function msgMatches(m, ts) {
-      const author = ((O.user(m.uid) || {}).name || '').toLowerCase();
+      const author = opts.anonymous ? '' : ((O.user(m.uid) || {}).name || '').toLowerCase();
       const hay = ((m.text || '') + '\n' + (m.forward ? (m.forward.text || '') : '') + '\n' + (m.share ? (m.share.title || '') + ' ' + (m.share.text || '') : '') + '\n' +
         (m.attachments ? Object.values(m.attachments).map(a => (a && a.name) || '').join(' ') : '') + '\n' +
         (m.forward && m.forward.attachments ? Object.values(m.forward.attachments).map(a => (a && a.name) || '').join(' ') : '')).toLowerCase();
@@ -311,7 +320,7 @@
     cleanups.push(closeSearch);
     function openSearch() {
       if (searchPanel) { searchPanel.querySelector('input').focus(); return; }
-      const sIn = el('input', { type: 'search', placeholder: 'Search messages, people or @name', autocomplete: 'off', spellcheck: 'false' });
+      const sIn = el('input', { type: 'search', placeholder: opts.anonymous ? 'Search messages' : 'Search messages, people or @name', autocomplete: 'off', spellcheck: 'false' });
       const close = el('button', { class: 'icon-btn', type: 'button', title: 'Close search', html: I.x, onclick: closeSearch });
       const info = el('div', { class: 'search-info' }, 'Type to search this conversation');
       const results = el('div', { class: 'search-results' });
@@ -333,9 +342,9 @@
         hits.slice(0, 60).forEach(([id, m]) => {
           const txt = m.text || (m.forward ? m.forward.text || '[forwarded message]' : m.share ? (m.share.title || m.share.text || '[shared post]') : m.attachments ? '[attachment] ' + Object.values(m.attachments).map(a => (a && a.name) || '').join(', ') : '');
           results.append(el('button', { type: 'button', class: 'sresult', onclick: () => { closeSearch(); goToMessage(id, all); } },
-            O.avatar(m.uid, 32, false),
+            authorAvatar(m.uid, 32, false),
             el('div', { class: 'grow' },
-              el('div', { class: 'sh' }, O.nameTag(m.uid), el('span', { class: 'time' }, O.clock(m.ts || 0))),
+              el('div', { class: 'sh' }, authorTag(m.uid), el('span', { class: 'time' }, O.clock(m.ts || 0))),
               el('div', { class: 'st', html: markText(txt, ts) }))));
         });
       };
@@ -363,19 +372,17 @@
       if (searchPanel && !searchPanel.contains(e.target) && !(opts.searchBtn && opts.searchBtn.contains(e.target))) closeSearch();
     });
 
-    // ---------- reply ----------
     function setReply(id, m) {
-      replyTo = { id, uid: m.uid, text: (m.text || (m.attachments ? '[attachment]' : '')).slice(0, 140) };
+      replyTo = { id, uid: opts.anonymous ? null : m.uid, anonymous: opts.anonymous || null, text: (m.text || (m.attachments ? '[attachment]' : '')).slice(0, 140) };
       replyBar.innerHTML = '';
       replyBar.append(el('span', { html: I.reply.replace('<svg', '<svg width="15" height="15"') }),
-        el('span', { class: 'grow' }, 'Replying to ', O.nameFrom(O.user(m.uid) || { name: 'unknown' }), el('span', { class: 'muted' }, ' — ' + (replyTo.text || ''))),
+        el('span', { class: 'grow' }, 'Replying to ', authorName(O.user(m.uid) || { name: 'unknown' }), el('span', { class: 'muted' }, ' — ' + (replyTo.text || ''))),
         el('button', { class: 'icon-btn', type: 'button', title: 'Cancel reply', html: I.x, onclick: clearReply }));
       replyBar.classList.remove('hidden');
       input.focus();
     }
     function clearReply() { replyTo = null; replyBar.classList.add('hidden'); replyBar.innerHTML = ''; }
 
-    // ---------- attachments ----------
     attachBtn.onclick = () => { if (O.canAct()) fileIn.click(); };
     fileIn.onchange = () => { addFiles([...fileIn.files]); fileIn.value = ''; };
     input.addEventListener('paste', e => {
@@ -409,7 +416,6 @@
       });
     }
 
-    // ---------- emoji / mention event ----------
     emojiBtn.onclick = () => O.openPicker(emojiBtn, id => insertText(':gd' + id + ':'), { keepOpen: true });
     function insertText(t) {
       const s = input.selectionStart ?? input.value.length, e = input.selectionEnd ?? input.value.length;
@@ -417,9 +423,8 @@
       input.selectionStart = input.selectionEnd = s + t.length;
       input.focus(); autosize(); updateSend(); typingPing();
     }
-    listen('mention', name => { const v = input.value; insertText((v && !/\s$/.test(v) ? ' ' : '') + '@' + name + ' '); });
+    if (!opts.anonymous) listen('mention', name => { const v = input.value; insertText((v && !/\s$/.test(v) ? ' ' : '') + '@' + name + ' '); });
 
-    // ---------- composer ----------
     function autosize() { input.style.height = 'auto'; input.style.height = Math.min(160, input.scrollHeight) + 'px'; }
     function updateSend() {
       const uploading = pending.some(p => p.status === 'uploading');
@@ -442,6 +447,7 @@
       try {
         if (opts.send) await opts.send(msg);
         else await db.ref(msgPath).push(msg);
+        O.playMessageSound('send');
       } catch (e) { O.toast('Could not send: ' + e.message, true); }
     }
     sendBtn.onclick = send;
@@ -465,7 +471,6 @@
     every(composerState, 1000);
     composerState();
 
-    // ---------- typing indicator ----------
     const typingRef = db.ref(opts.typingPath + '/' + uid);
     typingRef.onDisconnect().remove();
     let lastPing = 0, typingStopTimer = null;
@@ -486,6 +491,10 @@
       const names = Object.keys(typingState).filter(id => id !== uid && typingState[id] > cutoff && O.user(id)).map(id => O.user(id).name);
       typingEl.innerHTML = '';
       if (!names.length) return;
+      if (opts.anonymous) {
+        typingEl.append(el('span', { class: 'dots' }, el('i'), el('i'), el('i')), el('span', null, names.length === 1 ? 'Someone is typing' : 'Several people are typing'));
+        return;
+      }
       let label;
       if (names.length === 1) label = [el('b', null, names[0]), ' is typing'];
       else if (names.length === 2) label = [el('b', null, names[0]), ' and ', el('b', null, names[1]), ' are typing'];
@@ -497,9 +506,9 @@
     window.addEventListener('beforeunload', onUnload);
     cleanups.push(() => window.removeEventListener('beforeunload', onUnload));
 
-    // ---------- mention autocomplete ----------
     let mentionItems = [], mentionIdx = 0, mentionStart = -1;
     function mentionCheck() {
+      if (opts.anonymous) { mentionPop.classList.add('hidden'); mentionItems = []; return; }
       const pos = input.selectionStart;
       const m = input.value.slice(0, pos).match(/(^|\s)@([A-Za-z0-9_.-]{0,20})$/);
       if (!m) { mentionPop.classList.add('hidden'); mentionItems = []; return; }

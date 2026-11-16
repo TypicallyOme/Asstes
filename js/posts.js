@@ -1,6 +1,3 @@
-/* ============================================================
-   ORBIT — posts (threads-style feed)
-   ============================================================ */
 (function () {
   'use strict';
   const O = window.Orbit;
@@ -10,7 +7,6 @@
   O.$('#onlinePill').onclick = O.openMembers;
   O.on('change', () => { O.$('#onlineCount').textContent = Object.keys(O.S.presence).length; });
 
-  // ---------- composer ----------
   const ntText = O.$('#ntText'), ntPost = O.$('#ntPost'), ntAttach = O.$('#ntAttach'), ntEmoji = O.$('#ntEmoji');
   const ntTitle = O.$('#ntTitle');
   const ntEmbedEditor = O.$('#ntEmbedEditor'), ntEmbedUrlPane = O.$('#ntEmbedUrlPane'), ntEmbedHtmlPane = O.$('#ntEmbedHtmlPane');
@@ -153,7 +149,6 @@
   }
   ntPost.onclick = createPost;
 
-  // ---------- feed ----------
   const feed = O.$('#feed');
   const posts = new Map();
   const nodes = new Map();       // id -> {node, sig}
@@ -267,11 +262,9 @@
     return el('div', { class: 'post-embed' }, frame);
   }
 
-  // --- search ---
   const searchIn = O.$('#search'), searchClear = O.$('#searchClear'), searchMeta = O.$('#searchMeta');
   searchClear.innerHTML = I.x;
   function terms(q) { return q.toLowerCase().split(/\s+/).filter(Boolean); }
-  /** Every term must match the title, the text, or the author's name. "@name" matches the author only. */
   function matches(p, q) {
     const author = ((O.user(p.uid) || {}).name || '').toLowerCase();
     const hay = ((p.title || '') + '\n' + (p.text || '')).toLowerCase();
@@ -331,7 +324,6 @@
   searchIn.addEventListener('keydown', e => { if (e.key === 'Escape') { searchIn.value = ''; runSearch(); } });
   searchClear.onclick = () => { searchIn.value = ''; runSearch(); searchIn.focus(); };
 
-  // --- post menu ---
   let menuEl = null;
   function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
   document.addEventListener('pointerdown', e => { if (menuEl && !menuEl.contains(e.target)) closeMenu(); });
@@ -357,7 +349,6 @@
     node.append(menuEl);
   }
 
-  // --- share to chat ---
   function shareToChat(id, p) {
     if (!O.canAct()) return;
     const note = el('textarea', { class: 'textarea', rows: 2, placeholder: 'Add a message (optional)', maxlength: 1000, style: 'min-height:60px' });
@@ -421,7 +412,6 @@
     };
   }
 
-  // --- comments ---
   function toggleComments(id) {
     if (open.has(id)) open.delete(id); else open.add(id);
     const n = nodes.get(id);
@@ -487,7 +477,6 @@
     return ctrl;
   }
 
-  // --- deep links (#p=ID) ---
   function handleHash() {
     const m = location.hash.match(/p=([A-Za-z0-9_-]+)/);
     if (!m) return;

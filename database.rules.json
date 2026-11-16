@@ -10,23 +10,50 @@
       }
     },
     "names":    { ".read": true, ".write": true },
-    "roles":    { ".read": true, ".write": true },
-    "owners":   { ".read": true, ".write": true },
-    "customTags": { ".read": true, ".write": true },
-    "userTags": { ".read": true, ".write": true },
-    "announcement": { ".read": true, ".write": true },
+    "roles":    { ".read": true, ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'" },
+    "owners":   { ".read": true, ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'" },
+    "customTags": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true)" },
+    "userTags": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true)" },
+    "announcement": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true)" },
     "moreCards": { ".read": true, ".write": true },
     "communities": { ".read": true, ".write": true },
     "communityMsgs": { ".read": true, ".write": true },
     "communityTyping": { ".read": true, ".write": true },
-    "mod":      { ".read": true, ".write": true },
+    "channelMessages": {
+      ".read": true,
+      "$channel": {
+        ".indexOn": ["ts"],
+        "$id": {
+          ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true))",
+          "reactions": { ".write": true },
+          "text": { ".validate": "newData.isString() && newData.val().length <= 4000" }
+        }
+      }
+    },
+    "channelTyping": { ".read": true, "$channel": { ".read": true, "$uid": { ".write": true } } },
+    "omeglePool": { ".read": true, ".write": true },
+    "omegleSessions": { ".read": true, ".write": true },
+    "omegleRooms": {
+      ".read": true,
+      "$room": {
+        ".indexOn": ["ts"],
+        "$id": {
+          ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true))",
+          "reactions": { ".write": true },
+          "text": { ".validate": "newData.isString() && newData.val().length <= 4000" }
+        }
+      }
+    },
+    "omegleTyping": { ".read": true, "$room": { ".read": true, "$uid": { ".write": true } }},
+    "mod":      { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true)" },
     "presence": { ".read": true, "$uid": { ".write": true } },
     "typing":   { ".read": true, "$uid": { ".write": true } },
     "messages": {
       ".read": true,
       ".indexOn": ["ts"],
       "$id": {
-        ".write": true,
+        ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true))",
+        "reactions": { ".write": true },
         "text": { ".validate": "newData.isString() && newData.val().length <= 4000" }
       }
     },
@@ -34,7 +61,8 @@
       ".read": true,
       ".indexOn": ["ts"],
       "$id": {
-        ".write": true,
+        ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true))",
+        "reactions": { ".write": true },
         "text": { ".validate": "newData.isString() && newData.val().length <= 5000" },
         "embed": {
           ".validate": "!newData.exists() || (newData.child('type').val() == 'url' && newData.child('url').isString() && newData.child('url').val().length <= 2048) || (newData.child('type').val() == 'html' && newData.child('html').isString() && newData.child('html').val().length <= 20000)"
@@ -45,7 +73,8 @@
       ".read": true,
       "$postId": {
         "$id": {
-          ".write": true,
+          ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true))",
+          "reactions": { ".write": true },
           "text": { ".validate": "newData.isString() && newData.val().length <= 1000" }
         }
       }

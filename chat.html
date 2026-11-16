@@ -19,8 +19,13 @@
 <body>
   <header class="topbar">
     <a class="logo" href="index.html">Orbit</a>
-    <span class="title"># everyone</span>
+    <nav class="channel-tabs" aria-label="Chat channels">
+      <a class="channel-tab active" href="chat.html" aria-current="page">General</a>
+      <a class="channel-tab" href="anonymous.html">Anonymous Chat</a>
+      <a class="channel-tab" href="omegle.html">Omegle</a>
+    </nav>
     <span class="spacer"></span>
+    <span class="chat-tools-slot" id="messageTools"></span>
     <button class="icon-btn search-btn" id="searchBtn" type="button" title="Search messages (Ctrl+F)"></button>
     <span class="online-pill" id="onlinePill"><span class="dot"></span><span id="onlineCount">0</span> online</span>
   </header>
@@ -28,12 +33,14 @@
   <main class="convo" id="convo"></main>
 
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
   <script src="js/orbit.js"></script>
   <script src="js/convo.js"></script>
   <script>
     Orbit.init({ page: 'chat', require: true });
+    Orbit.$('#messageTools').replaceWith(Orbit.messageTools());
     Orbit.$('#onlinePill').onclick = Orbit.openMembers;
     Orbit.on('change', () => { Orbit.$('#onlineCount').textContent = Object.keys(Orbit.S.presence).length; });
     Orbit.Conversation({

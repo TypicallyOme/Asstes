@@ -1,12 +1,6 @@
-/* ============================================================
-   ORBIT — shared core
-   Firebase, identity, profiles, nav, emoji, uploads,
-   moderation, owner panel and admin panel.
-   ============================================================ */
 (function () {
   'use strict';
 
-  // ---------- Firebase ----------
   const firebaseConfig = {
     apiKey: "AIzaSyCrZmgL8mkK90qdnJ-WkHRaEMAHsgUQ3yM",
     authDomain: "orbit-5b26f.firebaseapp.com",
@@ -17,8 +11,11 @@
     appId: "1:964534662601:web:b067a00860f9e2f6d96418"
   };
   firebase.initializeApp(firebaseConfig);
+  const auth = firebase.auth();
   const db = firebase.database();
   const TS = firebase.database.ServerValue.TIMESTAMP;
+  // The owner is identified by Firebase Authentication, never by a password hash in this file.
+  const OWNER_UID = 'zdvC4quVlRSabq57SDXoukS7SAt2';
   // Set to true once Firebase Storage is enabled for the project (Console → Storage → Get started).
   // While false, uploads are stored in the Realtime Database (max ~9.5 MB per file).
   const USE_FIREBASE_STORAGE = false;
@@ -29,9 +26,7 @@
     storage.setMaxOperationRetryTime(15000);
   } catch (e) { storage = null; }
 
-  // sha256("tokoolkoala")
-  const OWNER_HASH = '9836a25f7d02c52e66faf055ae73b36ed70d99f959310953851ef68f63e827c7';
-  // Name-based staff tags. These nicknames are reserved: taking one needs the owner password.
+  // Name-based staff tags. These nicknames are reserved for the signed-in owner.
   const STAFF_NAMES = { omere: 'OWNER', ooze34: 'OWNER', ome: 'OWNER', orbit: 'OWNER' };
   const DB_FILE_MAX = 9.5 * 1024 * 1024;     // fallback (Realtime Database) upload cap
   const STORAGE_FILE_MAX = 50 * 1024 * 1024; // Firebase Storage upload cap
@@ -40,7 +35,6 @@
   db.ref('.info/serverTimeOffset').on('value', s => { serverOffset = s.val() || 0; });
   const now = () => Date.now() + serverOffset;
 
-  // ---------- tiny helpers ----------
   const ls = {
     get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
@@ -100,12 +94,6 @@
     if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
     return (b / 1048576).toFixed(1) + ' MB';
   }
-  async function sha256(str) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-
-  // ---------- icons ----------
   const svg = p => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
   const I = {
     chat: svg('<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>'),
@@ -133,20 +121,21 @@
     dm: svg('<path d="M21 4 3 11l7 2.5L12.5 21z"/><path d="m10 13.5 4.5-4.5"/>'),
     group: svg('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M19 8v6M16 11h6"/>'),
     back: svg('<path d="M15 5 8 12l7 7"/>'),
-    react: svg('<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/>')
+    react: svg('<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/>'),
+    bell: svg('<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>'),
+    bellOff: svg('<path d="M18 8a6 6 0 0 0-10.2-4.2M6 8c0 7-3 7-3 9h13M22 17c0-2-3-2-3-9M10 21h4M3 3l18 18"/>'),
+    volume: svg('<path d="M11 5 6 9H3v6h3l5 4zM15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>'),
+    volumeOff: svg('<path d="M11 5 6 9H3v6h3l5 4zM16 9l5 6M21 9l-5 6"/>')
   };
 
-  // ---------- events ----------
   const handlers = {};
   const on = (evt, fn) => { (handlers[evt] = handlers[evt] || []).push(fn); };
   const off = (evt, fn) => { if (handlers[evt]) handlers[evt] = handlers[evt].filter(f => f !== fn); };
   const emit = (evt, d) => (handlers[evt] || []).forEach(fn => { try { fn(d); } catch (e) { console.error(e); } });
 
-  // ---------- identity ----------
   let uid = ls.get('orbit_uid');
   if (!uid || !/^[A-Za-z0-9_-]{8,40}$/.test(uid)) { uid = db.ref().push().key; ls.set('orbit_uid', uid); }
 
-  // ---------- live state ----------
   const S = { users: {}, roles: {}, owners: {}, mod: {}, presence: {}, customTags: {}, userTags: {}, announcement: null, byName: {}, loaded: {} };
   let readyResolve;
   const ready = new Promise(r => { readyResolve = r; });
@@ -184,24 +173,25 @@
 
   const me = () => S.users[uid] && S.users[uid].name ? S.users[uid] : null;
   const user = id => (S.users[id] && S.users[id].name) ? S.users[id] : null;
-  const isOwner = (id = uid) => !!S.owners[id];
-  /** OWNER / CO OWNER tag: only for people who unlocked the owner panel AND use the matching name. */
+  const isOwner = (id = uid) => {
+    const ownerRecord = S.owners[id];
+    // Ignore old, client-forgeable boolean flags left by the previous public rules.
+    return !!ownerRecord && typeof ownerRecord === 'object' && ownerRecord.authUid === OWNER_UID;
+  };
   const staffTag = id => { const u = S.users[id]; return (isOwner(id) && u && u.name && STAFF_NAMES[u.name.toLowerCase()]) || null; };
   const isAdmin = (id = uid) => S.roles[id] === 'admin' || isOwner(id);
-  const ownerUnlocked = () => isOwner() && ss.get('orbit_owner') === '1';
+  const ownerUnlocked = () => isOwner() && auth.currentUser?.uid === OWNER_UID && ss.get('orbit_owner') === '1';
   const isBanned = (id = uid) => !!(S.mod[id] && S.mod[id].banned);
   const timeoutLeft = (id = uid) => Math.max(0, ((S.mod[id] && S.mod[id].timeoutUntil) || 0) - now());
   const isOnline = id => !!S.presence[id];
   const userByName = n => S.byName[String(n).toLowerCase()] || null;
 
-  /** Can the current user moderate content/profile belonging to `target`? Owners are untouchable. */
   function canModerate(target) {
     if (!isAdmin()) return false;
     if (target && isOwner(target) && target !== uid) return false;
     return true;
   }
 
-  /** Gate for any write action (send, post, react, comment). */
   function canAct(silent) {
     if (isBanned()) { if (!silent) toast('You are banned', true); return false; }
     const left = timeoutLeft();
@@ -210,7 +200,6 @@
     return true;
   }
 
-  // ---------- toast ----------
   function toast(msg, err) {
     let box = $('.toasts');
     if (!box) { box = el('div', { class: 'toasts' }); document.body.append(box); }
@@ -219,7 +208,177 @@
     setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2600);
   }
 
-  // ---------- modal ----------
+  let audioContext = null;
+  let soundEffectsOn = ls.get('orbit_sound_effects') !== '0';
+  let notificationsOn = ls.get('orbit_notifications') === '1';
+  window.addEventListener('storage', event => {
+    if (event.key === 'orbit_sound_effects') {
+      soundEffectsOn = event.newValue !== '0';
+      emit('soundPreference', soundEffectsOn);
+    }
+    if (event.key === 'orbit_notifications') {
+      notificationsOn = event.newValue === '1';
+      emit('notificationPreference', notificationsOn);
+    }
+  });
+  function audio() {
+    const Context = window.AudioContext || window.webkitAudioContext;
+    if (!Context) return null;
+    if (!audioContext) audioContext = new Context();
+    return audioContext;
+  }
+  function unlockAudio() {
+    const ctx = audio();
+    if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+  }
+  document.addEventListener('pointerdown', unlockAudio, { passive: true });
+  document.addEventListener('keydown', unlockAudio);
+  function playMessageSound(kind = 'receive') {
+    if (!soundEffectsOn) return;
+    const ctx = audio();
+    if (!ctx) return;
+    const play = () => {
+      const t = ctx.currentTime;
+      const notes = kind === 'send' ? [[740, 0, 0.07], [1046, 0.045, 0.09]] : [[880, 0, 0.11], [1318, 0.085, 0.16]];
+      notes.forEach(([frequency, delay, length]) => {
+        const osc = ctx.createOscillator(), gain = ctx.createGain();
+        osc.type = 'sine'; osc.frequency.setValueAtTime(frequency, t + delay);
+        gain.gain.setValueAtTime(0.0001, t + delay);
+        gain.gain.exponentialRampToValueAtTime(0.075, t + delay + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + delay + length);
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.start(t + delay); osc.stop(t + delay + length + 0.015);
+      });
+    };
+    if (ctx.state === 'suspended') ctx.resume().then(play).catch(() => {});
+    else play();
+  }
+  function requestMessageNotifications() {
+    if (!('Notification' in window)) {
+      toast('This browser does not support desktop notifications', true);
+      return;
+    }
+    if (notificationsOn) {
+      notificationsOn = false;
+      ls.set('orbit_notifications', '0');
+      emit('notificationPreference', false);
+      toast('Message notifications turned off');
+      return;
+    }
+    if (Notification.permission === 'denied') {
+      toast('Notifications are blocked in your browser settings', true);
+      return;
+    }
+    const permission = Notification.permission === 'granted' ? Promise.resolve('granted') : Notification.requestPermission();
+    permission.then(result => {
+      notificationsOn = result === 'granted';
+      ls.set('orbit_notifications', notificationsOn ? '1' : '0');
+      emit('notificationPreference', notificationsOn);
+      toast(notificationsOn ? 'Message notifications enabled' : 'Notification permission was not granted', !notificationsOn);
+    }).catch(() => toast('Could not enable browser notifications', true));
+  }
+  function messageTools() {
+    const notifications = el('button', { class: 'icon-btn chat-tool', type: 'button' });
+    const sounds = el('button', { class: 'icon-btn chat-tool', type: 'button' });
+    const refresh = () => {
+      notifications.innerHTML = notificationsOn ? I.bell : I.bellOff;
+      notifications.title = notificationsOn ? 'Turn message notifications off' : 'Enable message notifications';
+      notifications.setAttribute('aria-label', notifications.title);
+      notifications.setAttribute('aria-pressed', String(notificationsOn));
+      sounds.innerHTML = soundEffectsOn ? I.volume : I.volumeOff;
+      sounds.title = soundEffectsOn ? 'Turn message sounds off' : 'Turn message sounds on';
+      sounds.setAttribute('aria-label', sounds.title);
+      sounds.setAttribute('aria-pressed', String(soundEffectsOn));
+    };
+    notifications.onclick = requestMessageNotifications;
+    on('notificationPreference', refresh);
+    on('soundPreference', refresh);
+    sounds.onclick = () => {
+      soundEffectsOn = !soundEffectsOn;
+      ls.set('orbit_sound_effects', soundEffectsOn ? '1' : '0');
+      emit('soundPreference', soundEffectsOn);
+      refresh();
+      if (soundEffectsOn) playMessageSound('receive');
+    };
+    refresh();
+    return el('div', { class: 'chat-tools' }, notifications, sounds);
+  }
+  function messagePreview(message) {
+    const text = String(message && message.text || '').trim();
+    if (text) return text.replace(/:gd\d{1,4}:/g, '🙂').slice(0, 180);
+    if (message && message.forward) return String(message.forward.text || 'Forwarded a message').slice(0, 180);
+    if (message && message.attachments) return 'Sent an attachment';
+    if (message && message.share) return 'Shared an item';
+    return 'Sent a message';
+  }
+  function notifyIncoming({ id, title, body, href }) {
+    if (id) {
+      try {
+        const recent = JSON.parse(ls.get('orbit_recent_message_notices') || '[]');
+        if (recent.includes(id)) return;
+        recent.push(id);
+        if (recent.length > 100) recent.splice(0, recent.length - 100);
+        ls.set('orbit_recent_message_notices', JSON.stringify(recent));
+      } catch (e) {}
+    }
+    playMessageSound('receive');
+    const away = document.visibilityState === 'hidden' || !document.hasFocus();
+    if (away && notificationsOn && 'Notification' in window && Notification.permission === 'granted') {
+      try {
+        const notice = new Notification(title, { body, icon: 'favicon.png', tag: id || 'orbit-message' });
+        notice.onclick = () => {
+          window.focus();
+          if (href) window.location.href = href;
+          notice.close();
+        };
+      } catch (e) { if (!document.hidden) toast(title + ': ' + body); }
+    } else if (!document.hidden) toast(title + ': ' + body);
+  }
+  function watchLatestMessage(path, onMessage, notifyBaseline) {
+    const query = db.ref(path).limitToLast(1);
+    let stopped = false, callback = null;
+    query.once('value').then(snapshot => {
+      if (stopped) return;
+      let latest = null, latestMessage = null;
+      snapshot.forEach(child => { latest = child.key; latestMessage = child.val(); });
+      if (latestMessage && notifyBaseline && notifyBaseline(latestMessage, latest)) onMessage(latestMessage, latest);
+      callback = query.on('child_added', child => {
+        if (child.key === latest) return;
+        latest = child.key;
+        const message = child.val();
+        if (message && message.uid !== uid) onMessage(message, child.key);
+      });
+    }).catch(() => {});
+    return () => { stopped = true; if (callback) query.off('child_added', callback); };
+  }
+  watchLatestMessage('messages', (message, key) => {
+    const name = (user(message.uid) || {}).name || 'Someone';
+    notifyIncoming({ id: 'general:' + key, title: 'General · ' + name, body: messagePreview(message), href: 'chat.html' });
+  });
+  watchLatestMessage('channelMessages/anonymous', (message, key) => {
+    notifyIncoming({ id: 'anonymous:' + key, title: 'Anonymous Chat', body: 'Anonymous: ' + messagePreview(message), href: 'anonymous.html' });
+  });
+  const dmNoticeWatches = new Map();
+  db.ref('userConvs/' + uid).on('value', snapshot => {
+    const current = new Set();
+    snapshot.forEach(child => {
+      const cid = child.key; current.add(cid);
+      if (dmNoticeWatches.has(cid)) return;
+      let cancelled = false, stopWatch = () => {};
+      dmNoticeWatches.set(cid, () => { cancelled = true; stopWatch(); });
+      db.ref('reads/' + uid + '/' + cid).once('value').then(readSnapshot => {
+        if (cancelled) return;
+        const readAt = Number(readSnapshot.val()) || 0;
+        const activityAt = Number(child.val()) || 0;
+        stopWatch = watchLatestMessage('convMsgs/' + cid, (message, key) => {
+          const name = (user(message.uid) || {}).name || 'Someone';
+          notifyIncoming({ id: 'dm:' + cid + ':' + key, title: name, body: messagePreview(message), href: 'dms.html#c=' + encodeURIComponent(cid) });
+        }, message => message.uid !== uid && (Number(message.ts) > readAt || (activityAt > readAt && !Number(message.ts))));
+      }).catch(() => {});
+    });
+    for (const [cid, stop] of dmNoticeWatches) if (!current.has(cid)) { stop(); dmNoticeWatches.delete(cid); }
+  });
+
   const modalStack = [];
   function modal({ title, body, foot, wide, position, dismissable = true, onClose, cls }) {
     const bd = el('div', { class: 'backdrop ' + (position || '') + ' ' + (cls || '') });
@@ -296,7 +455,6 @@
     }
   });
 
-  // ---------- emoji (Geometry Dash faces) ----------
   const EMOJI_BASE = 'https://cdn.jsdelivr.net/gh/TypicallyOme/Website-Assets@main/features/assets/Geometry%20Dash%20Faces/';
   const EMOJI_IDS = [193,194,195,196,197,199,200,201,202,203,205,207,208,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300,301,302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,318,319,320,321,322,323,324,325,326,327,328,329,330,331,332,333,334,335,336,337,338,339,340,341,342,343,344,345,346,347,348,349,350,351,352,353,354,355,356,357,358,359,360,361,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63];
   const EMOJI_INDEX = new Map(EMOJI_IDS.map((id, i) => [String(id), i]));
@@ -319,7 +477,6 @@
     document.removeEventListener('pointerdown', pickerState.outside, true);
     pickerState = null;
   }
-  /** Opens the emoji picker next to `anchor`; onPick(id) receives the emoji id. */
   function openPicker(anchor, onPick, { keepOpen = false, title = 'Emojis' } = {}) {
     if (pickerState && pickerState.anchor === anchor) { closePicker(); return; }
     closePicker();
@@ -448,7 +605,6 @@
   window.addEventListener('resize', positionEmojiSuggestions);
   document.addEventListener('scroll', positionEmojiSuggestions, true);
 
-  // ---------- rich text ----------
   const URL_RE = /(https?:\/\/[^\s<>"']+)/g;
   function richHTML(text) {
     const parts = String(text || '').split(URL_RE);
@@ -490,7 +646,6 @@
     if (m) openUserCard(m.dataset.uid);
   });
 
-  // ---------- avatar / name ----------
   const FRAMES = [
     ['none', 'None'], ['ring', 'Ring'], ['dashed', 'Dashed'], ['double', 'Double'], ['neon', 'Neon'],
     ['gold', 'Gold'], ['rainbow', 'Rainbow'], ['orbit', 'Orbit'], ['glitch', 'Glitch']
@@ -547,14 +702,12 @@
     if (withBadges && u) wrap.append(...badges(id));
     return wrap;
   }
-  /** Signature of everything about a user that affects how they render. */
   function userSig(id) {
     const u = S.users[id] || {};
     const tags = customTagEntries(id).map(([tagId, tag]) => [tagId, tag.name, tag.color, tag.effect]);
     return [u.name, u.avatar && u.avatar.length + u.avatar.slice(-24), u.effect, u.frame, isOwner(id), isAdmin(id), JSON.stringify(tags)].join('|');
   }
 
-  // ---------- uploads ----------
   const EXT = {
     image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif', 'ico', 'tif', 'tiff', 'heic', 'heif', 'apng', 'jfif'],
     audio: ['mp3', 'wav', 'ogg', 'oga', 'm4a', 'aac', 'flac', 'opus', 'weba'],
@@ -587,7 +740,6 @@
       });
     });
   }
-  /** Upload a file and return an attachment object {kind,name,type,size,url|fid}. */
   async function upload(file, onProgress) {
     const kind = kindOf(file);
     if (!kind) throw new Error('Only images, audio (mp3…) and video (mp4…) can be attached');
@@ -666,8 +818,6 @@
     });
   }
 
-  // ---------- reactions ----------
-  /** Renders reaction chips. path = db path of the `reactions` node. */
   function reactionsEl(reactions, path, { allowAdd = true } = {}) {
     const box = el('div', { class: 'reacts' });
     const r = reactions || {};
@@ -696,7 +846,6 @@
     ref.once('value').then(s => s.exists() ? ref.remove() : ref.set(true));
   }
 
-  // ---------- nav / chrome ----------
   let chromeMounted = false;
   function mountChrome(active) {
     if (chromeMounted) return; chromeMounted = true;
@@ -823,7 +972,6 @@
     on('change', refresh); refresh();
   }
 
-  // ---------- ban / self state ----------
   function selfCheck() {
     const banned = isBanned();
     let scr = $('.banscreen');
@@ -837,7 +985,6 @@
     if (isOwner() && ss.get('orbit_owner') !== '1') { /* owner on a new session — panel will ask password */ }
   }
 
-  // ---------- profile panel ----------
   async function processAvatar(file) {
     if (kindOf(file) !== 'image') throw new Error('Pick an image file');
     if (/gif/i.test(file.type) && file.size < 1048576) return readDataURL(file);
@@ -861,11 +1008,7 @@
     if (!NAME_RE.test(name)) throw new Error('Nickname: 2–20 letters, numbers, _ . or -');
     const k = nameKey(name);
     if (STAFF_NAMES[name.toLowerCase()] && (!cur.name || nameKey(cur.name) !== k) && !ownerUnlocked()) {
-      const pw = await promptText({ title: '"' + name + '" is a reserved name', placeholder: 'Owner password', multiline: false, type: 'password', okLabel: 'Confirm' });
-      if (pw === null) throw new Error('Cancelled');
-      let ok = false;
-      try { ok = (await sha256(pw)) === OWNER_HASH; } catch (e) {}
-      if (!ok) throw new Error('Wrong password — that name is reserved');
+      throw new Error('Sign in to the owner account before using that reserved nickname');
     }
     if (!cur.name || nameKey(cur.name) !== k) {
       const res = await db.ref('names/' + k).transaction(v => (v === null || v === target || !S.users[v] || !S.users[v].name) ? target : undefined);
@@ -982,7 +1125,6 @@
     setTimeout(() => nameIn.focus(), 50);
   }
 
-  // ---------- user card & members ----------
   function openUserCard(id) {
     const u = user(id);
     if (!u) return;
@@ -1079,11 +1221,9 @@
     render();
   }
 
-  // ---------- direct messages & group chats ----------
   const dmId = (a, b) => 'dm_' + [a, b].sort().join('_');
   const dm = {
     id: dmId,
-    /** Make sure a 1:1 DM with `other` exists and is in my list; returns its id. */
     async ensure(other) {
       const cid = dmId(uid, other);
       const ref = db.ref('convs/' + cid);
@@ -1103,8 +1243,7 @@
       await db.ref().update(upd);
       return ref.key;
     },
-    /** Send a message into a DM / group and bump it in every member's list. */
-    async send(cid, msg) {
+    async send(cid, msg, { silentSound = false } = {}) {
       const meta = (await db.ref('convs/' + cid).once('value')).val();
       if (!meta || !meta.members || !meta.members[uid]) throw new Error('You are not in this conversation');
       const ref = db.ref('convMsgs/' + cid).push();
@@ -1115,10 +1254,10 @@
       Object.keys(meta.members).forEach(m => { upd['userConvs/' + m + '/' + cid] = TS; });
       upd['reads/' + uid + '/' + cid] = TS;
       await db.ref().update(upd);
+      if (!silentSound) playMessageSound('send');
       return ref.key;
     },
     markRead(cid) { return db.ref('reads/' + uid + '/' + cid).set(TS); },
-    /** My conversations, newest first: [[cid, meta], ...] */
     async listMine() {
       const s = await db.ref('userConvs/' + uid).once('value');
       const ids = Object.keys(s.val() || {});
@@ -1134,7 +1273,6 @@
     }
   };
 
-  // ---------- moderation actions ----------
   function guard(target, ownerOnly) {
     if (ownerOnly && !ownerUnlocked()) { toast('Owner only', true); return false; }
     if (!canModerate(target)) { toast(isOwner(target) ? "You can't moderate the owner" : 'Not allowed', true); return false; }
@@ -1200,7 +1338,6 @@
     });
   }
 
-  // ---------- owner key + panels ----------
   const isEditable = t => t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
   document.addEventListener('keydown', e => {
     if ((e.key === '`' || e.key === '~') && !isEditable(e.target) && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -1214,23 +1351,44 @@
     await ready;
     if (ownerUnlocked()) return openStaffPanel('owner');
     gateOpen = true;
-    const input = el('input', { class: 'input', type: 'password', placeholder: 'Owner password', autocomplete: 'off' });
-    const go = el('button', { class: 'btn primary' }, 'Unlock');
-    const m = modal({ title: 'Owner panel', body: el('div', null, el('div', { class: 'muted', style: 'font-size:13px;margin-bottom:10px', html: I.lock.replace('<svg', '<svg width="14" height="14" style="vertical-align:-2px"') + ' Enter the owner password' }), input), foot: [go], onClose: () => { gateOpen = false; } });
+    const email = el('input', { class: 'input', type: 'email', placeholder: 'Owner account email', autocomplete: 'username', required: true });
+    const password = el('input', { class: 'input', type: 'password', placeholder: 'Owner account password', autocomplete: 'current-password', required: true, style: 'margin-top:10px' });
+    const go = el('button', { class: 'btn primary' }, 'Sign in');
+    const m = modal({ title: 'Owner panel', body: el('div', null,
+      el('div', { class: 'muted', style: 'font-size:13px;margin-bottom:10px', html: I.lock.replace('<svg', '<svg width="14" height="14" style="vertical-align:-2px"') + ' Sign in with the configured owner account' }),
+      email, password), foot: [go], onClose: () => { gateOpen = false; } });
     const attempt = async () => {
-      let hash = '';
-      try { hash = await sha256(input.value); } catch (e) { toast('Open Orbit over https or localhost to use the owner panel', true); return; }
-      if (hash !== OWNER_HASH) { input.value = ''; input.focus(); toast('Wrong password', true); return; }
-      await db.ref('owners/' + uid).set(true);
-      S.owners[uid] = true;
-      ss.set('orbit_owner', '1');
-      m.close();
-      toast('Owner panel unlocked');
-      openStaffPanel('owner');
+      if (!email.value.trim() || !password.value) { toast('Enter your owner account email and password', true); return; }
+      go.disabled = true;
+      go.textContent = 'Signing in…';
+      try {
+        await auth.setPersistence(firebase.auth.Auth.Persistence.SESSION);
+        const credential = await auth.signInWithEmailAndPassword(email.value.trim(), password.value);
+        if (!credential.user || credential.user.uid !== OWNER_UID) {
+          await auth.signOut();
+          password.value = '';
+          password.focus();
+          toast('This Firebase account is not the configured owner account', true);
+          return;
+        }
+        const marker = { authUid: OWNER_UID };
+        await db.ref('owners/' + uid).set(marker);
+        S.owners[uid] = marker;
+        ss.set('orbit_owner', '1');
+        m.close();
+        toast('Owner panel unlocked');
+        openStaffPanel('owner');
+      } catch (e) {
+        console.error('Orbit owner sign-in failed:', e);
+        toast('Sign-in failed. Check the owner account email and password.', true);
+      } finally {
+        go.disabled = false;
+        go.textContent = 'Sign in';
+      }
     };
     go.onclick = attempt;
-    input.addEventListener('keydown', e => { if (e.key === 'Enter') attempt(); });
-    setTimeout(() => input.focus(), 40);
+    [email, password].forEach(input => input.addEventListener('keydown', e => { if (e.key === 'Enter') attempt(); }));
+    setTimeout(() => email.focus(), 40);
   }
 
   function openStaffPanel(mode) {
@@ -1250,7 +1408,12 @@
 
     const foot = [];
     if (owner) {
-      foot.push(el('button', { class: 'btn sm ghost', onclick: () => { ss.del('orbit_owner'); m.close(); toast('Owner panel locked'); } }, 'Lock panel'));
+      foot.push(el('button', { class: 'btn sm ghost', onclick: async () => {
+        ss.del('orbit_owner');
+        m.close();
+        try { await auth.signOut(); toast('Owner panel locked'); }
+        catch (e) { console.error('Orbit owner sign-out failed:', e); toast('Panel closed, but sign-out failed. Reload and try again.', true); }
+      } }, 'Lock panel'));
     }
     const m = modal({
       title: owner ? 'Owner panel' : 'Admin panel', wide: true, cls: 'staff-' + mode,
@@ -1614,7 +1777,6 @@
     showTab();
   }
 
-  // ---------- init ----------
   let requireProfile = false;
   async function init({ page, require = false } = {}) {
     requireProfile = require;
@@ -1628,6 +1790,7 @@
     on, off, emit, ready, init, dm, staffTag,
     me, user, isOwner, isAdmin, ownerUnlocked, isBanned, timeoutLeft, isOnline, userByName, canModerate, canAct,
     toast, modal, confirmBox, promptText, chooseDuration,
+    messageTools, playMessageSound, notifyIncoming,
     EMOJI_IDS, isEmoji, emojiUrl, emojiImg, openPicker, closePicker,
     richEl, richHTML, mentionsMe,
     avatar, avatarFrom, nameTag, nameFrom, badges, userSig,

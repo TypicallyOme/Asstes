@@ -15,7 +15,6 @@
     .column { border-left: 1px solid var(--line); border-right: 1px solid var(--line); min-height: calc(100vh - 60px); }
     @media (max-width: 660px) { .column { border: none; } }
 
-    /* composer */
     .new-thread { display: flex; gap: 12px; padding: 18px 18px 14px; border-bottom: 1px solid var(--line); }
     .new-thread .nt-main { flex: 1; min-width: 0; }
     .new-thread textarea {
@@ -48,7 +47,6 @@
     @media (max-width: 560px) { .post-embed iframe { height: 58vh; } .nt-embed-toggle { padding: 0 8px; } }
 
 
-    /* thread */
     .thread { display: flex; gap: 12px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); position: relative; }
     .thread.flash { animation: flash 1.6s ease; }
     @keyframes flash { 0%, 40% { background: #ffffff12; } }
@@ -76,7 +74,6 @@
     .menu button.danger { color: var(--danger); }
     .menu svg { width: 16px; height: 16px; }
 
-    /* comments */
     .comments { margin-top: 6px; }
     .comment { display: flex; gap: 10px; padding: 10px 0 4px; }
     .comment .c-main { flex: 1; min-width: 0; }
@@ -100,7 +97,6 @@
     .nt-title::placeholder { color: var(--muted); font-weight: 600; }
     .t-title { font-weight: 700; font-size: 16px; margin-top: 2px; overflow-wrap: anywhere; }
 
-    /* search */
     .searchbar { position: sticky; top: 60px; z-index: 15; padding: 12px 18px; background: rgba(0,0,0,.86); backdrop-filter: blur(14px); border-bottom: 1px solid var(--line); }
     .search-box { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 6px 0 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line-2); transition: border-color .15s; }
     .search-box:focus-within { border-color: #444; }
@@ -180,6 +176,7 @@
   </main>
 
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
   <script src="js/orbit.js"></script>
