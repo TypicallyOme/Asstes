@@ -12,9 +12,24 @@
     "names":    { ".read": true, ".write": true },
     "roles":    { ".read": true, ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'" },
     "owners":   { ".read": true, ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'" },
-    "customTags": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true)" },
-    "userTags": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true)" },
-    "announcement": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true)" },
+    "adminAuthUids": {
+      "$authUid": {
+        ".read": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.uid === $authUid)",
+        ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'",
+        ".validate": "!newData.exists() || (newData.isString() && root.child('roles').child(newData.val()).val() === 'admin')"
+      }
+    },
+    "adminAuthByProfile": {
+      "$profileId": {
+        ".read": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'",
+        ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'"
+      }
+    },
+    "customTags": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists())" },
+    "userTags": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists())" },
+    "announcement": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists())" },
+    "publicSettings": { ".read": true, ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'" },
+    "chatSettings": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists())" },
     "moreCards": { ".read": true, ".write": true },
     "communities": { ".read": true, ".write": true },
     "communityMsgs": { ".read": true, ".write": true },
@@ -24,8 +39,9 @@
       "$channel": {
         ".indexOn": ["ts"],
         "$id": {
-          ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true))",
+          ".write": "(!data.exists() && root.child('chatSettings').child('lockdown').val() !== true) || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
           "reactions": { ".write": true },
+          "ts": { ".validate": "newData.isNumber() && newData.val() <= now && newData.val() >= now - 60000" },
           "text": { ".validate": "newData.isString() && newData.val().length <= 4000" }
         }
       }
@@ -38,22 +54,26 @@
       "$room": {
         ".indexOn": ["ts"],
         "$id": {
-          ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true))",
+          ".write": "(!data.exists() && root.child('chatSettings').child('lockdown').val() !== true) || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
           "reactions": { ".write": true },
+          "ts": { ".validate": "newData.isNumber() && newData.val() <= now && newData.val() >= now - 60000" },
           "text": { ".validate": "newData.isString() && newData.val().length <= 4000" }
         }
       }
     },
     "omegleTyping": { ".read": true, "$room": { ".read": true, "$uid": { ".write": true } }},
-    "mod":      { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true)" },
+    "mod":      { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists())" },
     "presence": { ".read": true, "$uid": { ".write": true } },
+    "presenceSessions": { ".read": true, "$uid": { ".write": true } },
     "typing":   { ".read": true, "$uid": { ".write": true } },
     "messages": {
       ".read": true,
+      ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'",
       ".indexOn": ["ts"],
       "$id": {
-        ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true))",
+        ".write": "(!data.exists() && root.child('chatSettings').child('lockdown').val() !== true) || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
         "reactions": { ".write": true },
+        "ts": { ".validate": "newData.isNumber() && newData.val() <= now && newData.val() >= now - 60000" },
         "text": { ".validate": "newData.isString() && newData.val().length <= 4000" }
       }
     },
@@ -61,7 +81,7 @@
       ".read": true,
       ".indexOn": ["ts"],
       "$id": {
-        ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true))",
+        ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
         "reactions": { ".write": true },
         "text": { ".validate": "newData.isString() && newData.val().length <= 5000" },
         "embed": {
@@ -73,7 +93,7 @@
       ".read": true,
       "$postId": {
         "$id": {
-          ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true))",
+          ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
           "reactions": { ".write": true },
           "text": { ".validate": "newData.isString() && newData.val().length <= 1000" }
         }

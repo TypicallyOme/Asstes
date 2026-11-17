@@ -16,7 +16,7 @@
 .omegle-wait { flex: 1; display: grid; place-items: center; text-align: center; color: var(--text-2); padding: 24px; }
 .omegle-wait strong { display: block; color: var(--text); margin-bottom: 6px; }
 .feed { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
-.feed-inner { max-width: 860px; margin: 0 auto; padding: 16px 12px 8px; }
+.feed-inner { max-width: 1160px; margin: 0 auto; padding: 16px 16px 8px; }
 .older { display: flex; justify-content: center; margin: 4px 0 14px; }
 
 .msg { position: relative; display: flex; gap: 12px; padding: 6px 10px; border-radius: 12px; margin-top: 10px; transition: background .12s; }
@@ -61,7 +61,7 @@
 .share-card .sc-open { font-size: 12px; color: var(--text-2); margin-top: 8px; }
 
 .composer-area { flex: none; padding: 0 12px calc(var(--nav-h) + 28px); position: relative; }
-.composer-wrap { max-width: 860px; margin: 0 auto; position: relative; }
+.composer-wrap { max-width: 1160px; margin: 0 auto; position: relative; }
 .typing { height: 22px; font-size: 12.5px; color: var(--text-2); padding: 0 6px; display: flex; align-items: center; gap: 8px; }
 .typing .dots { display: inline-flex; gap: 3px; }
 .typing .dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--text-2); animation: bounce 1s infinite; }

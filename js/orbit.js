@@ -14,6 +14,35 @@
   const auth = firebase.auth();
   const db = firebase.database();
   const TS = firebase.database.ServerValue.TIMESTAMP;
+  let firebaseAdminClaim = false;
+  let firebaseAdminLinked = false;
+  let firebaseAdminProfile = null;
+  let adminAuthLinkRef = null;
+  let adminAuthLinkListener = null;
+  auth.onIdTokenChanged(async user => {
+    firebaseAdminClaim = false;
+    firebaseAdminLinked = false;
+    firebaseAdminProfile = null;
+    if (adminAuthLinkRef && adminAuthLinkListener) adminAuthLinkRef.off('value', adminAuthLinkListener);
+    adminAuthLinkRef = null;
+    adminAuthLinkListener = null;
+    if (!user) { queueMicrotask(() => queueChange()); return; }
+    try {
+      const result = await user.getIdTokenResult();
+      firebaseAdminClaim = result.claims.admin === true;
+    } catch (e) { firebaseAdminClaim = false; }
+    if (user.uid !== OWNER_UID) {
+      adminAuthLinkRef = db.ref('adminAuthUids/' + user.uid);
+      adminAuthLinkListener = snap => {
+        firebaseAdminProfile = typeof snap.val() === 'string' ? snap.val() : null;
+        firebaseAdminLinked = !!firebaseAdminProfile && firebaseAdminProfile === uid;
+        queueChange();
+      };
+      adminAuthLinkRef.on('value', adminAuthLinkListener, () => {
+        firebaseAdminProfile = null; firebaseAdminLinked = false; queueChange();
+      });
+    } else queueChange();
+  });
   // The owner is identified by Firebase Authentication, never by a password hash in this file.
   const OWNER_UID = 'zdvC4quVlRSabq57SDXoukS7SAt2';
   // Set to true once Firebase Storage is enabled for the project (Console → Storage → Get started).
@@ -125,7 +154,9 @@
     bell: svg('<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>'),
     bellOff: svg('<path d="M18 8a6 6 0 0 0-10.2-4.2M6 8c0 7-3 7-3 9h13M22 17c0-2-3-2-3-9M10 21h4M3 3l18 18"/>'),
     volume: svg('<path d="M11 5 6 9H3v6h3l5 4zM15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>'),
-    volumeOff: svg('<path d="M11 5 6 9H3v6h3l5 4zM16 9l5 6M21 9l-5 6"/>')
+    volumeOff: svg('<path d="M11 5 6 9H3v6h3l5 4zM16 9l5 6M21 9l-5 6"/>'),
+    external: svg('<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/>'),
+    settings: svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-1.7 2.9-.2-.1a1.7 1.7 0 0 0-1.8.3l-.1.1h-3.4l-.1-.2a1.7 1.7 0 0 0-1.8-.3l-.2.1-1.7-2.9.1-.1a1.7 1.7 0 0 0 .3-1.9l-.1-.2-2.9-1.7.1-.2a1.7 1.7 0 0 0-.3-1.8l-.1-.1V7.6l.2-.1a1.7 1.7 0 0 0 .3-1.8l-.1-.2 2.9-1.7.1.1a1.7 1.7 0 0 0 1.9.3l.2-.1h3.4l.1.2a1.7 1.7 0 0 0 1.8.3l.2-.1 1.7 2.9-.1.1a1.7 1.7 0 0 0-.3 1.9l.1.2 2.9 1.7-.1.2a1.7 1.7 0 0 0 .3 1.8l.1.1v3.4l-.2.1a1.7 1.7 0 0 0-.3 1.8z"/>')
   };
 
   const handlers = {};
@@ -136,7 +167,40 @@
   let uid = ls.get('orbit_uid');
   if (!uid || !/^[A-Za-z0-9_-]{8,40}$/.test(uid)) { uid = db.ref().push().key; ls.set('orbit_uid', uid); }
 
-  const S = { users: {}, roles: {}, owners: {}, mod: {}, presence: {}, customTags: {}, userTags: {}, announcement: null, byName: {}, loaded: {} };
+  const S = { users: {}, roles: {}, owners: {}, mod: {}, presence: {}, presenceSessions: {}, customTags: {}, userTags: {}, announcement: null, publicSettings: {}, chatSettings: {}, byName: {}, loaded: {} };
+  const localAppearanceKey = 'orbit_appearance';
+  const defaultFavicon = 'favicon.png';
+  function appearanceLocal() {
+    try { return JSON.parse(ls.get(localAppearanceKey) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function appearanceColor(value) { return /^#[0-9a-f]{6}$/i.test(String(value || '')) ? value : null; }
+  function appearanceImage(value) {
+    if (typeof value !== 'string' || value.length > 180000) return null;
+    if (/^data:image\/(png|jpeg|webp|gif);base64,/i.test(value)) return value;
+    try {
+      const url = new URL(value, location.href);
+      return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+    } catch (e) { return null; }
+  }
+  function applyAppearance() {
+    const personal = appearanceLocal();
+    const global = S.publicSettings || {};
+    const background = global.background !== undefined ? global.background : personal.background;
+    const favicon = global.favicon !== undefined ? global.favicon : personal.favicon;
+    const font = global.font !== undefined ? global.font : personal.font;
+    const root = document.documentElement;
+    const color = background === 'default' ? null : appearanceColor(background);
+    if (color) root.style.setProperty('--bg', color); else root.style.removeProperty('--bg');
+    document.body && document.body.classList.toggle('orbit-font-pusab', font === 'pusab');
+    document.querySelectorAll('link[rel~="icon"]').forEach(link => { link.href = favicon === 'default' || !favicon ? defaultFavicon : (appearanceImage(favicon) || defaultFavicon); });
+  }
+  function saveAppearance(next) {
+    const current = appearanceLocal();
+    const value = { ...current, ...next };
+    ls.set(localAppearanceKey, JSON.stringify(value));
+    applyAppearance();
+    emit('appearance', value);
+  }
   let readyResolve;
   const ready = new Promise(r => { readyResolve = r; });
   let changeQueued = false;
@@ -145,9 +209,9 @@
     changeQueued = true;
     requestAnimationFrame(() => { changeQueued = false; emit('change'); selfCheck(); });
   }
-  ['users', 'roles', 'owners', 'mod', 'presence', 'customTags', 'userTags', 'announcement'].forEach(key => {
+  ['users', 'roles', 'owners', 'mod', 'presence', 'presenceSessions', 'customTags', 'userTags', 'announcement', 'publicSettings', 'chatSettings'].forEach(key => {
     db.ref(key).on('value', snap => {
-      S[key] = key === 'announcement' ? snap.val() : (snap.val() || {});
+      S[key] = ['announcement'].includes(key) ? snap.val() : (snap.val() || {});
       if (key === 'users') {
         S.byName = {};
         for (const id in S.users) { const u = S.users[id]; if (u && u.name) S.byName[u.name.toLowerCase()] = id; }
@@ -156,6 +220,7 @@
       if (['users', 'roles', 'owners', 'mod'].every(k => S.loaded[k])) readyResolve();
       if (key === 'customTags') emit('customTags', S.customTags);
       if (key === 'announcement') { emit('announcement', S.announcement); renderAnnouncement(S.announcement); }
+      if (key === 'publicSettings') { applyAppearance(); emit('publicSettings', S.publicSettings); }
       if (key === 'users' && S.announcement) renderAnnouncement(S.announcement);
       queueChange();
     }, err => {
@@ -164,12 +229,19 @@
     });
   });
 
+  applyAppearance();
+  const presenceSessionId = db.ref('presenceSessions/' + uid).push().key;
+  let presenceHeartbeat = null;
   db.ref('.info/connected').on('value', s => {
+    if (presenceHeartbeat) { clearInterval(presenceHeartbeat); presenceHeartbeat = null; }
     if (!s.val()) return;
-    const r = db.ref('presence/' + uid);
+    const r = db.ref('presenceSessions/' + uid + '/' + presenceSessionId);
     r.onDisconnect().remove();
-    r.set({ ts: TS });
+    const ping = () => r.set({ ts: TS }).catch(() => {});
+    ping();
+    presenceHeartbeat = setInterval(ping, 30000);
   });
+  window.addEventListener('beforeunload', () => { if (presenceHeartbeat) clearInterval(presenceHeartbeat); });
 
   const me = () => S.users[uid] && S.users[uid].name ? S.users[uid] : null;
   const user = id => (S.users[id] && S.users[id].name) ? S.users[id] : null;
@@ -183,11 +255,22 @@
   const ownerUnlocked = () => isOwner() && auth.currentUser?.uid === OWNER_UID && ss.get('orbit_owner') === '1';
   const isBanned = (id = uid) => !!(S.mod[id] && S.mod[id].banned);
   const timeoutLeft = (id = uid) => Math.max(0, ((S.mod[id] && S.mod[id].timeoutUntil) || 0) - now());
-  const isOnline = id => !!S.presence[id];
+  const isOnline = id => {
+    if (!user(id)) return false;
+    const time = now(), cutoff = time - 90000, ceiling = time + 30000;
+    const fresh = entry => entry && Number(entry.ts) >= cutoff && Number(entry.ts) <= ceiling;
+    const sessions = S.presenceSessions[id];
+    if (sessions && Object.values(sessions).some(fresh)) return true;
+    const legacy = S.presence[id];
+    return !!fresh(legacy);
+  };
+  const onlineCount = () => Object.keys(S.users).filter(id => user(id) && isOnline(id)).length;
   const userByName = n => S.byName[String(n).toLowerCase()] || null;
 
   function canModerate(target) {
     if (!isAdmin()) return false;
+    if (isOwner()) { if (!ownerUnlocked()) return false; }
+    else if (!firebaseAdminClaim && !(firebaseAdminLinked && firebaseAdminProfile === uid)) return false;
     if (target && isOwner(target) && target !== uid) return false;
     return true;
   }
@@ -220,6 +303,7 @@
       notificationsOn = event.newValue === '1';
       emit('notificationPreference', notificationsOn);
     }
+    if (event.key === localAppearanceKey) applyAppearance();
   });
   function audio() {
     const Context = window.AudioContext || window.webkitAudioContext;
@@ -280,6 +364,8 @@
   function messageTools() {
     const notifications = el('button', { class: 'icon-btn chat-tool', type: 'button' });
     const sounds = el('button', { class: 'icon-btn chat-tool', type: 'button' });
+    const cloak = el('button', { class: 'icon-btn chat-tool', type: 'button', title: 'Open Orbit in an about:blank tab', 'aria-label': 'Open Orbit in an about:blank tab', html: I.external, onclick: openAboutBlank });
+    const settings = el('button', { class: 'icon-btn chat-tool', type: 'button', title: 'Settings', 'aria-label': 'Settings', html: I.settings, onclick: openSettingsPanel });
     const refresh = () => {
       notifications.innerHTML = notificationsOn ? I.bell : I.bellOff;
       notifications.title = notificationsOn ? 'Turn message notifications off' : 'Enable message notifications';
@@ -301,7 +387,74 @@
       if (soundEffectsOn) playMessageSound('receive');
     };
     refresh();
-    return el('div', { class: 'chat-tools' }, notifications, sounds);
+    return el('div', { class: 'chat-tools' }, notifications, sounds, cloak, settings);
+  }
+  function openAboutBlank() {
+    const tab = window.open('about:blank', '_blank');
+    if (!tab) return toast('Allow pop-ups to open Orbit in a new tab', true);
+    try {
+      tab.opener = null;
+      tab.document.title = document.title;
+      tab.document.documentElement.style.cssText = 'width:100%;height:100%;margin:0;background:#000';
+      tab.document.body.style.cssText = 'width:100%;height:100%;margin:0;overflow:hidden;background:#000';
+      const frame = tab.document.createElement('iframe');
+      frame.title = 'Orbit'; frame.src = location.href;
+      frame.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;border:0;background:#000';
+      tab.document.body.append(frame);
+    } catch (e) { toast('Could not open the cloaked tab', true); }
+  }
+  function openSettingsPanel() {
+    const personal = appearanceLocal();
+    const global = S.publicSettings || {};
+    const background = el('input', { class: 'input appearance-color', type: 'color', value: appearanceColor(personal.background) || appearanceColor(global.background) || '#000000' });
+    const iconUrl = el('input', { class: 'input', type: 'url', placeholder: 'https://example.com/icon.png', value: typeof personal.favicon === 'string' && personal.favicon !== 'default' ? personal.favicon : typeof global.favicon === 'string' ? global.favicon : '' });
+    const iconFile = el('input', { type: 'file', accept: 'image/*', class: 'hidden' });
+    const iconUpload = el('button', { class: 'btn sm', type: 'button', onclick: () => iconFile.click() }, 'Choose image');
+    const font = el('select', { class: 'select' }, [
+      el('option', { value: 'default' }, 'Default font'),
+      el('option', { value: 'pusab' }, 'Pusab')
+    ]);
+    font.value = ['default', 'pusab'].includes(personal.font) ? personal.font : (global.font === 'pusab' ? 'pusab' : 'default');
+    const backgroundReset = el('button', { class: 'btn sm ghost', type: 'button' }, 'Default background');
+    const iconReset = el('button', { class: 'btn sm ghost', type: 'button' }, 'Default favicon');
+    const note = el('div', { class: 'muted appearance-note' });
+    const backgroundLocked = Object.prototype.hasOwnProperty.call(global, 'background');
+    const faviconLocked = Object.prototype.hasOwnProperty.call(global, 'favicon');
+    const fontLocked = Object.prototype.hasOwnProperty.call(global, 'font');
+    background.disabled = backgroundLocked; backgroundReset.disabled = backgroundLocked;
+    iconUrl.disabled = faviconLocked; iconUpload.disabled = faviconLocked; iconReset.disabled = faviconLocked;
+    font.disabled = fontLocked;
+    const locks = [backgroundLocked && 'background', faviconLocked && 'favicon', fontLocked && 'font'].filter(Boolean);
+    note.textContent = locks.length ? 'Some options are currently set for everyone by the site owner: ' + locks.join(', ') + '.' : 'Changes save automatically on this device.';
+    const section = (title, desc, control) => el('section', { class: 'appearance-section' },
+      el('div', null, el('strong', null, title), el('div', { class: 'muted', style: 'font-size:12px;margin-top:3px' }, desc)), control);
+    const body = el('div', { class: 'appearance-settings' }, note,
+      section('Background color', 'Choose a custom page background.', el('div', { class: 'appearance-controls' }, background, backgroundReset)),
+      section('Tab icon', 'Use an image URL or choose a local image for the browser tab.', el('div', { class: 'appearance-icon-controls' }, iconUrl, iconFile, iconUpload, iconReset)),
+      section('Font', 'Choose Pusab or the site’s default font.', font));
+    const dialog = modal({ title: 'Settings', body, wide: true });
+    background.addEventListener('input', () => saveAppearance({ background: background.value }));
+    backgroundReset.onclick = () => { saveAppearance({ background: 'default' }); background.value = '#000000'; };
+    font.addEventListener('change', () => saveAppearance({ font: font.value }));
+    iconUrl.addEventListener('change', () => {
+      const value = iconUrl.value.trim();
+      if (!value) { saveAppearance({ favicon: 'default' }); return; }
+      const valid = appearanceImage(value);
+      if (!valid) { toast('Enter a valid http or https image URL', true); return; }
+      saveAppearance({ favicon: valid });
+    });
+    iconReset.onclick = () => { saveAppearance({ favicon: 'default' }); iconUrl.value = ''; };
+    iconFile.onchange = async () => {
+      const file = iconFile.files && iconFile.files[0]; iconFile.value = '';
+      if (!file) return;
+      try {
+        const value = await processAvatar(file);
+        if (!appearanceImage(value)) throw new Error('That image is too large to use as a tab icon');
+        saveAppearance({ favicon: value }); iconUrl.value = '';
+      } catch (e) { toast(e.message || 'Could not use that image', true); }
+    };
+    setTimeout(() => background.focus(), 30);
+    return dialog;
   }
   function messagePreview(message) {
     const text = String(message && message.text || '').trim();
@@ -418,7 +571,7 @@
       ok.focus();
     });
   }
-  function promptText({ title, value = '', placeholder = '', okLabel = 'Save', multiline = true, type = 'text' }) {
+  function promptText({ title, value = '', placeholder = '', okLabel = 'Save', multiline = true, type = 'text', help = '' }) {
     return new Promise(res => {
       let done = false;
       const input = multiline
@@ -427,7 +580,8 @@
       input.value = value;
       const ok = el('button', { class: 'btn primary' }, okLabel);
       const cancel = el('button', { class: 'btn ghost' }, 'Cancel');
-      const m = modal({ title, body: input, foot: [cancel, ok], onClose: () => { if (!done) res(null); } });
+      const body = help ? el('div', null, el('div', { class: 'muted', style: 'font-size:13px;margin-bottom:10px' }, help), input) : input;
+      const m = modal({ title, body, foot: [cancel, ok], onClose: () => { if (!done) res(null); } });
       const submit = () => { done = true; const v = input.value; m.close(); res(v); };
       ok.onclick = submit;
       cancel.onclick = () => m.close();
@@ -648,11 +802,13 @@
 
   const FRAMES = [
     ['none', 'None'], ['ring', 'Ring'], ['dashed', 'Dashed'], ['double', 'Double'], ['neon', 'Neon'],
-    ['gold', 'Gold'], ['rainbow', 'Rainbow'], ['orbit', 'Orbit'], ['glitch', 'Glitch']
+    ['gold', 'Gold'], ['rainbow', 'Rainbow'], ['orbit', 'Orbit'], ['glitch', 'Glitch'],
+    ['ice', 'Ice'], ['rose', 'Rose'], ['mint', 'Mint']
   ];
   const EFFECTS = [
     ['none', 'None'], ['glow', 'Glow'], ['shimmer', 'Shimmer'], ['rainbow', 'Rainbow'], ['neon', 'Neon'],
-    ['gold', 'Gold'], ['fire', 'Fire'], ['glitch', 'Glitch'], ['pulse', 'Pulse'], ['outline', 'Outline']
+    ['gold', 'Gold'], ['fire', 'Fire'], ['glitch', 'Glitch'], ['pulse', 'Pulse'], ['outline', 'Outline'],
+    ['ice', 'Ice'], ['rose', 'Rose'], ['mint', 'Mint']
   ];
   const okFrame = f => FRAMES.some(x => x[0] === f) ? f : 'none';
   const okEffect = f => EFFECTS.some(x => x[0] === f) ? f : 'none';
@@ -967,7 +1123,7 @@
         profBtn.append(me() ? avatarFrom(me(), 34) : el('span', { html: I.user, style: 'width:22px;height:22px;display:grid;color:var(--text-2)' }));
         const a = profBtn.querySelector('.av'); if (a) a.style.pointerEvents = 'none';
       }
-      adminBtn.classList.toggle('hidden', !(S.roles[uid] === 'admin' && !isOwner()));
+      adminBtn.classList.toggle('hidden', !(isAdmin() && !isOwner()));
     };
     on('change', refresh); refresh();
   }
@@ -1203,7 +1359,7 @@
   });
 
   function openMembers() {
-    const list = el('div');
+    const list = el('div', { class: 'members-grid' });
     const search = el('input', { class: 'input', placeholder: 'Search members', style: 'margin-bottom:12px' });
     const render = () => {
       const q = search.value.trim().toLowerCase();
@@ -1211,13 +1367,15 @@
         .sort((a, b) => (isOnline(b) - isOnline(a)) || (isOwner(b) - isOwner(a)) || (isAdmin(b) - isAdmin(a)) || user(a).name.localeCompare(user(b).name));
       list.innerHTML = '';
       if (!ids.length) list.append(el('div', { class: 'empty' }, 'No members yet'));
-      ids.forEach(id => list.append(el('div', { class: 'mrow', style: 'cursor:pointer', onclick: () => openUserCard(id) },
-        avatar(id, 34, false),
-        el('div', { class: 'grow' }, nameTag(id), el('div', { class: 'sub' }, isOnline(id) ? '● online' : 'offline')))));
+      ids.forEach(id => list.append(el('button', { type: 'button', class: 'member-card', onclick: () => openUserCard(id) },
+        avatar(id, 44, false),
+        el('div', { class: 'member-card-copy' }, nameTag(id), el('div', { class: 'sub' }, isOnline(id) ? '● online' : 'offline')))));
     };
     search.oninput = render;
-    const m = modal({ title: 'Members · ' + Object.keys(S.users).filter(id => user(id)).length, body: el('div', null, search, list), onClose: () => off() });
-    const off = (() => { const fn = () => render(); on('change', fn); return () => { handlers.change = handlers.change.filter(f => f !== fn); }; })();
+    const count = () => Object.keys(S.users).filter(id => user(id)).length;
+    const m = modal({ title: 'Members · ' + count() + ' · ' + onlineCount() + ' online', body: el('div', { class: 'members-content' }, search, list), wide: true, cls: 'members-modal', onClose: () => off() });
+    const update = () => { m.head.querySelector('h3').textContent = 'Members · ' + count() + ' · ' + onlineCount() + ' online'; render(); };
+    const off = (() => { const fn = () => update(); on('change', fn); return () => { handlers.change = handlers.change.filter(f => f !== fn); }; })();
     render();
   }
 
@@ -1274,58 +1432,150 @@
   };
 
   function guard(target, ownerOnly) {
+    if (isOwner() && !ownerUnlocked()) { toast('Sign in to the owner panel before using owner actions', true); return false; }
     if (ownerOnly && !ownerUnlocked()) { toast('Owner only', true); return false; }
-    if (!canModerate(target)) { toast(isOwner(target) ? "You can't moderate the owner" : 'Not allowed', true); return false; }
+    if (!canModerate(target)) {
+      if (isAdmin() && !isOwner() && !firebaseAdminClaim && !(firebaseAdminLinked && firebaseAdminProfile === uid)) toast('Sign in with the Firebase account linked to this Orbit admin profile', true);
+      else toast(isOwner(target) ? "You can't moderate the owner" : 'Not allowed', true);
+      return false;
+    }
     return true;
   }
+  function canManageContent(ownerId) {
+    if (isOwner() && !ownerUnlocked()) { toast('Sign in to the owner panel before using owner actions', true); return false; }
+    if (ownerId === uid) {
+      if (isAdmin() && !isOwner() && !firebaseAdminClaim && !(firebaseAdminLinked && firebaseAdminProfile === uid)) { toast('Sign in with the Firebase account linked to this Orbit admin profile', true); return false; }
+      return true;
+    }
+    return guard(ownerId);
+  }
+  function staffWriteAllowed() {
+    if (canManageChatSettings()) return true;
+    toast(isAdmin() ? 'Sign in with the Firebase account linked to this Orbit admin profile' : 'Not allowed', true);
+    return false;
+  }
+  function canManageChatSettings() {
+    return ownerUnlocked() || (isAdmin() && (firebaseAdminClaim || (firebaseAdminLinked && firebaseAdminProfile === uid)));
+  }
+  async function updateChatSettings(patch) {
+    if (!canManageChatSettings()) { toast('Only an authenticated owner or admin can change chat protection', true); return false; }
+    const safe = {};
+    if (typeof patch.lockdown === 'boolean') safe.lockdown = patch.lockdown;
+    if ([0, 2000, 5000, 10000].includes(Number(patch.slowModeMs))) safe.slowModeMs = Number(patch.slowModeMs);
+    if (typeof patch.autoLock === 'boolean') safe.autoLock = patch.autoLock;
+    if (patch.lockdownAt === null || patch.lockdownAt === TS) safe.lockdownAt = patch.lockdownAt;
+    if (patch.lockdownBy === null || patch.lockdownBy === uid) safe.lockdownBy = patch.lockdownBy;
+    if (patch.autoLocked === null || typeof patch.autoLocked === 'boolean') safe.autoLocked = patch.autoLocked;
+    try { await db.ref('chatSettings').update(safe); return true; }
+    catch (e) { reportDbFailure('Save chat protection', e); return false; }
+  }
+  function reportDbFailure(action, error) {
+    console.error('Orbit: ' + action + ' failed', error);
+    const denied = error && (error.code === 'PERMISSION_DENIED' || /permission.?denied|insufficient permissions/i.test(error.message || ''));
+    toast(action + ' failed: ' + (denied ? 'Firebase Realtime Database rules denied this write.' : (error && error.message) || 'database error'), true);
+  }
   const mod = {
-    async timeout(id, ms) { if (!guard(id)) return; await db.ref('mod/' + id).update({ timeoutUntil: now() + ms, by: uid }); toast((user(id) || {}).name + ' timed out for ' + fmtDur(ms)); },
-    async untimeout(id) { if (!guard(id)) return; await db.ref('mod/' + id + '/timeoutUntil').set(0); toast('Timeout removed'); },
+    async timeout(id, ms) { if (!guard(id)) return; try { await db.ref('mod/' + id).update({ timeoutUntil: now() + ms, by: uid }); toast((user(id) || {}).name + ' timed out for ' + fmtDur(ms)); } catch (e) { reportDbFailure('Timeout', e); } },
+    async untimeout(id) { if (!guard(id)) return; try { await db.ref('mod/' + id + '/timeoutUntil').set(0); toast('Timeout removed'); } catch (e) { reportDbFailure('Remove timeout', e); } },
     async ban(id) {
       if (!guard(id, true)) return;
       const reason = await promptText({ title: 'Ban ' + ((user(id) || {}).name || 'user'), placeholder: 'Reason (optional)', multiline: false, okLabel: 'Ban' });
       if (reason === null) return;
-      await db.ref('mod/' + id).update({ banned: true, reason: reason.slice(0, 200) || null, by: uid }); toast('User banned');
+      try { await db.ref('mod/' + id).update({ banned: true, reason: reason.slice(0, 200) || null, by: uid }); toast('User banned'); } catch (e) { reportDbFailure('Ban user', e); }
     },
-    async unban(id) { if (!guard(id, true)) return; await db.ref('mod/' + id).update({ banned: null, reason: null }); toast('User unbanned'); },
-    async setAdmin(id, v) { if (!guard(id, true)) return; await db.ref('roles/' + id).set(v ? 'admin' : null); toast(v ? 'Admin granted' : 'Admin removed'); },
+    async unban(id) { if (!guard(id, true)) return; try { await db.ref('mod/' + id).update({ banned: null, reason: null }); toast('User unbanned'); } catch (e) { reportDbFailure('Unban user', e); } },
+    async setAdmin(id, v) {
+      if (!guard(id, true)) return;
+      try {
+        if (v) {
+          await db.ref('roles/' + id).set('admin');
+          toast('Orbit admin role set. Link a Firebase Auth account to enable protected actions.');
+        } else {
+          const link = await db.ref('adminAuthByProfile/' + id).once('value');
+          const updates = { ['roles/' + id]: null, ['adminAuthByProfile/' + id]: null };
+          if (link.val()) updates['adminAuthUids/' + link.val()] = null;
+          await db.ref().update(updates);
+          toast('Admin role and linked account access removed');
+        }
+      } catch (e) { reportDbFailure(v ? 'Grant admin role' : 'Remove admin role', e); }
+    },
     async deleteUser(id) {
       if (!guard(id, true)) return;
       const u = user(id);
       if (!(await confirmBox('Delete the profile of ' + (u ? u.name : 'this user') + '? Their messages and posts stay unless you remove them.', 'Delete profile', true))) return;
       const upd = {}; upd['users/' + id] = null; upd['roles/' + id] = null;
       if (u) upd['names/' + nameKey(u.name)] = null;
-      await db.ref().update(upd); toast('Profile deleted');
+      try {
+        const link = await db.ref('adminAuthByProfile/' + id).once('value');
+        upd['adminAuthByProfile/' + id] = null;
+        if (link.val()) upd['adminAuthUids/' + link.val()] = null;
+        await db.ref().update(upd); toast('Profile deleted');
+      } catch (e) { reportDbFailure('Delete profile', e); }
     },
     async editMessage(id, msg, base = 'messages') {
-      if (!(msg.uid === uid || guard(msg.uid))) return;
+      if (!canManageContent(msg.uid)) return;
       const t = await promptText({ title: 'Edit message', value: msg.text || '' });
       if (t === null) return;
-      await db.ref(base + '/' + id).update({ text: t.slice(0, 4000), edited: true, editedBy: uid });
+      try { await db.ref(base + '/' + id).update({ text: t.slice(0, 4000), edited: true, editedBy: uid }); } catch (e) { reportDbFailure('Edit message', e); }
     },
     async deleteMessage(id, msg, skipConfirm, base = 'messages') {
-      if (!(msg.uid === uid || guard(msg.uid))) return;
+      if (!canManageContent(msg.uid)) return;
       if (!skipConfirm && !(await confirmBox('Delete this message?', 'Delete', true))) return;
-      await db.ref(base + '/' + id).remove(); deleteFiles(msg.attachments);
+      try { await db.ref(base + '/' + id).remove(); deleteFiles(msg.attachments); } catch (e) { reportDbFailure('Delete message', e); }
     },
     async editPost(id, post) {
-      if (!(post.uid === uid || guard(post.uid))) return;
+      if (!canManageContent(post.uid)) return;
       const t = await promptText({ title: 'Edit post', value: post.text || '' });
       if (t === null) return;
-      await db.ref('posts/' + id).update({ text: t.slice(0, 5000), edited: true, editedBy: uid });
+      try { await db.ref('posts/' + id).update({ text: t.slice(0, 5000), edited: true, editedBy: uid }); } catch (e) { reportDbFailure('Edit post', e); }
     },
     async deletePost(id, post) {
-      if (!(post.uid === uid || guard(post.uid))) return;
+      if (!canManageContent(post.uid)) return;
       if (!(await confirmBox('Delete this post and its comments?', 'Delete', true))) return;
-      await db.ref().update({ ['posts/' + id]: null, ['comments/' + id]: null }); deleteFiles(post.attachments);
+      try {
+        const commentSnapshot = await db.ref('comments/' + id).once('value');
+        const updates = { ['posts/' + id]: null };
+        Object.keys(commentSnapshot.val() || {}).forEach(commentId => {
+          updates['comments/' + id + '/' + commentId] = null;
+        });
+        await db.ref().update(updates);
+        deleteFiles(post.attachments);
+      } catch (e) { reportDbFailure('Delete post', e); }
     },
     async deleteComment(postId, cid, c) {
-      if (!(c.uid === uid || guard(c.uid))) return;
+      if (!canManageContent(c.uid)) return;
       if (!(await confirmBox('Delete this comment?', 'Delete', true))) return;
-      await db.ref('comments/' + postId + '/' + cid).remove();
-      db.ref('posts/' + postId + '/commentCount').transaction(n => Math.max(0, (n || 1) - 1));
+      try { await db.ref('comments/' + postId + '/' + cid).remove();
+        await db.ref('posts/' + postId + '/commentCount').transaction(n => Math.max(0, (n || 1) - 1));
+      } catch (e) { reportDbFailure('Delete comment', e); }
     }
   };
+  async function linkAdminAccount(profileId) {
+    if (!guard(profileId, true)) return;
+    if (S.roles[profileId] !== 'admin') return toast('Make this profile an admin first', true);
+    const current = await db.ref('adminAuthByProfile/' + profileId).once('value').catch(() => null);
+    const oldAuthUid = current && current.val();
+    const value = await promptText({
+      title: 'Link Firebase account',
+      value: typeof oldAuthUid === 'string' ? oldAuthUid : '',
+      placeholder: 'Firebase Authentication user UID', multiline: false,
+      help: 'Create this admin in Firebase Console → Authentication → Users with Email/Password, then paste its UID here.'
+    });
+    if (value === null) return;
+    const authUid = value.trim();
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(authUid)) return toast('Enter a valid Firebase Authentication UID', true);
+    try {
+      const existing = await db.ref('adminAuthUids/' + authUid).once('value');
+      if (existing.val() && existing.val() !== profileId) return toast('That Firebase account is already linked to another Orbit profile', true);
+      const updates = {
+        ['adminAuthByProfile/' + profileId]: authUid,
+        ['adminAuthUids/' + authUid]: profileId
+      };
+      if (oldAuthUid && oldAuthUid !== authUid) updates['adminAuthUids/' + oldAuthUid] = null;
+      await db.ref().update(updates);
+      toast('Firebase account linked. The admin can sign in from their Admin panel.');
+    } catch (e) { reportDbFailure('Link Firebase account', e); }
+  }
   function timeoutButton(id, after) {
     const t = timeoutLeft(id) > 0;
     return el('button', {
@@ -1391,6 +1641,44 @@
     setTimeout(() => email.focus(), 40);
   }
 
+  async function openAdminGate() {
+    if (!isAdmin() || isOwner()) return toast('Admins only', true);
+    const email = el('input', { class: 'input', type: 'email', placeholder: 'Admin Firebase account email', autocomplete: 'username', required: true });
+    const password = el('input', { class: 'input', type: 'password', placeholder: 'Firebase account password', autocomplete: 'current-password', required: true, style: 'margin-top:10px' });
+    const go = el('button', { class: 'btn primary' }, 'Sign in');
+    const m = modal({ title: 'Admin sign in', body: el('div', null,
+      el('div', { class: 'muted', style: 'font-size:13px;margin-bottom:10px' }, 'Use the Email/Password Firebase account that the owner linked to your Orbit profile.'),
+      email, password), foot: [go] });
+    const attempt = async () => {
+      if (!email.value.trim() || !password.value) { toast('Enter your Firebase account email and password', true); return; }
+      go.disabled = true; go.textContent = 'Signing in…';
+      try {
+        await auth.setPersistence(firebase.auth.Auth.Persistence.SESSION);
+        const credential = await auth.signInWithEmailAndPassword(email.value.trim(), password.value);
+        const authUser = credential.user;
+        const [link, token] = await Promise.all([
+          db.ref('adminAuthUids/' + authUser.uid).once('value'),
+          authUser.getIdTokenResult()
+        ]);
+        const authorized = token.claims.admin === true || link.val() === uid;
+        if (!authorized) {
+          await auth.signOut();
+          password.value = ''; password.focus();
+          toast('This Firebase account is not linked to your Orbit admin profile', true);
+          return;
+        }
+        m.close();
+        toast('Admin account signed in');
+      } catch (e) {
+        console.error('Orbit admin sign-in failed:', e);
+        toast('Sign-in failed. Check the Firebase account email and password.', true);
+      } finally { go.disabled = false; go.textContent = 'Sign in'; }
+    };
+    go.onclick = attempt;
+    [email, password].forEach(input => input.addEventListener('keydown', e => { if (e.key === 'Enter') attempt(); }));
+    setTimeout(() => email.focus(), 40);
+  }
+
   function openStaffPanel(mode) {
     const owner = mode === 'owner';
     if (owner && !ownerUnlocked()) return openOwnerGate();
@@ -1399,7 +1687,9 @@
 
     const tabsEl = el('div', { class: 'tabs' });
     const content = el('div');
-    const tabNames = ['Users', 'Chat', 'Posts', 'Tags', 'Announce'];
+    const permissionNote = owner ? null : el('div', { class: 'staff-permission-note hidden' });
+    let authUnsubscribe = null;
+    const tabNames = owner ? ['Users', 'Chat', 'Posts', 'Tags', 'Announce', 'Public settings'] : ['Users', 'Chat', 'Posts', 'Tags', 'Announce'];
     let tab = 'Users';
     const detach = [];
     const cleanup = () => { detach.splice(0).forEach(fn => fn()); };
@@ -1418,10 +1708,25 @@
     const m = modal({
       title: owner ? 'Owner panel' : 'Admin panel', wide: true, cls: 'staff-' + mode,
       position: owner ? '' : 'bottom-left',
-      body: el('div', null, tabsEl, content), foot: foot.length ? foot : null,
-      onClose: cleanup
+      body: el('div', null, tabsEl, permissionNote, content), foot: foot.length ? foot : null,
+      onClose: () => { cleanup(); if (authUnsubscribe) authUnsubscribe(); }
     });
     m.head.querySelector('h3').prepend(el('span', { html: (owner ? I.crown : I.shield).replace('<svg', '<svg width="17" height="17" style="vertical-align:-3px;margin-right:8px"') }));
+    if (!owner) {
+      const refreshPermissionNote = () => {
+        const allowed = firebaseAdminClaim || (firebaseAdminLinked && firebaseAdminProfile === uid);
+        permissionNote.classList.toggle('hidden', allowed);
+        if (allowed) { permissionNote.replaceChildren(); return; }
+        const text = auth.currentUser
+          ? 'This Firebase account is not linked to this Orbit admin profile. Ask the owner to link its Firebase UID.'
+          : 'Admin actions need a linked Firebase sign-in. Ask the owner to create an Email/Password account and link its Firebase UID, then sign in here.';
+        permissionNote.replaceChildren(el('span', null, text), el('button', { class: 'btn sm', type: 'button', style: 'margin-left:10px', onclick: openAdminGate }, auth.currentUser ? 'Switch account' : 'Sign in'));
+      };
+      on('change', refreshPermissionNote);
+      detach.push(() => { handlers.change = (handlers.change || []).filter(fn => fn !== refreshPermissionNote); });
+      authUnsubscribe = auth.onIdTokenChanged(() => setTimeout(refreshPermissionNote, 0));
+      refreshPermissionNote();
+    }
 
     function showTab() {
       cleanup();
@@ -1432,20 +1737,34 @@
       if (tab === 'Posts') postsTab();
       if (tab === 'Tags') tagsTab();
       if (tab === 'Announce') announcementsTab();
+      if (tab === 'Public settings' && owner) publicSettingsTab();
     }
 
     function protectedTag() { return el('span', { class: 'sub' }, 'Protected'); }
 
     function usersTab() {
       const search = el('input', { class: 'input', placeholder: 'Search users', style: 'margin-bottom:12px' });
+      const filter = el('select', { class: 'select user-filter', 'aria-label': 'Filter users' }, [
+        el('option', { value: 'all' }, 'All users'), el('option', { value: 'online' }, 'Online'),
+        el('option', { value: 'offline' }, 'Offline'), el('option', { value: 'admins' }, 'Admins'),
+        el('option', { value: 'members' }, 'Members'), el('option', { value: 'banned' }, 'Banned')
+      ]);
       const list = el('div');
-      content.append(search, list);
+      content.append(el('div', { class: 'user-filter-row' }, search, filter), list);
       const render = () => {
         const q = search.value.trim().toLowerCase();
-        const ids = Object.keys(S.users).filter(id => user(id) && (!q || user(id).name.toLowerCase().includes(q)))
+        const ids = Object.keys(S.users).filter(id => {
+          if (!user(id) || (q && !user(id).name.toLowerCase().includes(q))) return false;
+          if (filter.value === 'online' && !isOnline(id)) return false;
+          if (filter.value === 'offline' && isOnline(id)) return false;
+          if (filter.value === 'admins' && !isAdmin(id)) return false;
+          if (filter.value === 'members' && isAdmin(id)) return false;
+          if (filter.value === 'banned' && !isBanned(id)) return false;
+          return true;
+        })
           .sort((a, b) => (isOwner(b) - isOwner(a)) || (isAdmin(b) - isAdmin(a)) || user(a).name.localeCompare(user(b).name));
         list.innerHTML = '';
-        if (!ids.length) list.append(el('div', { class: 'empty' }, 'No users yet'));
+        if (!ids.length) list.append(el('div', { class: 'empty' }, q || filter.value !== 'all' ? 'No users match this filter' : 'No users yet'));
         ids.forEach(id => {
           const acts = el('div', { class: 'acts' });
           const self = id === uid;
@@ -1454,6 +1773,7 @@
             acts.append(el('button', { class: 'btn sm', onclick: () => openProfile({ target: id }) }, 'Edit'));
             if (!self) {
               acts.append(el('button', { class: 'btn sm', onclick: () => mod.setAdmin(id, S.roles[id] !== 'admin') }, S.roles[id] === 'admin' ? 'Remove admin' : 'Make admin'));
+            if (S.roles[id] === 'admin') acts.append(el('button', { class: 'btn sm', title: 'Link this profile to a Firebase Authentication account', onclick: () => linkAdminAccount(id) }, 'Link Firebase account'));
               acts.append(timeoutButton(id));
               acts.append(isBanned(id)
                 ? el('button', { class: 'btn sm', onclick: () => mod.unban(id) }, 'Unban')
@@ -1471,6 +1791,7 @@
         });
       };
       search.oninput = render;
+      filter.onchange = render;
       const fn = () => { if (document.activeElement && list.contains(document.activeElement)) return; render(); };
       on('change', fn); detach.push(() => { handlers.change = handlers.change.filter(f => f !== fn); });
       const tick = setInterval(render, 15000); detach.push(() => clearInterval(tick));
@@ -1497,6 +1818,7 @@
       colorIn.addEventListener('input', paintCreatePreview);
 
       const createTag = async () => {
+        if (!staffWriteAllowed()) return;
         const name = nameIn.value.trim();
         if (!name) { toast('Enter a tag name', true); nameIn.focus(); return; }
         if (name.length > 24) { toast('Tag names can be up to 24 characters', true); return; }
@@ -1509,7 +1831,7 @@
           nameIn.value = '';
           paintCreatePreview();
           toast('Tag created');
-        } catch (e) { toast('Could not create tag', true); }
+        } catch (e) { reportDbFailure('Create tag', e); }
       };
       const createCard = el('div', { class: 'tag-card' },
         el('div', { class: 'muted', style: 'font-size:13px;margin-bottom:8px' }, 'Create tags and apply them to users from the Users tab. They appear beside names across the site.'),
@@ -1535,6 +1857,7 @@
           tagEffect.addEventListener('change', paintSample);
           paintSample();
           const save = async () => {
+            if (!staffWriteAllowed()) return;
             const name = tagName.value.trim();
             if (!name) { toast('Tag name cannot be empty', true); tagName.focus(); return; }
             if (Object.entries(S.customTags).some(([otherId, other]) => otherId !== id && String(other.name || '').toLowerCase() === name.toLowerCase())) {
@@ -1543,16 +1866,17 @@
             try {
               await db.ref('customTags/' + id).update({ name, color: safeTagColor(tagColor.value), effect: okEffect(tagEffect.value), updatedAt: TS });
               toast('Tag saved');
-            } catch (e) { toast('Could not save tag', true); }
+            } catch (e) { reportDbFailure('Save tag', e); }
           };
           const remove = async () => {
+            if (!staffWriteAllowed()) return;
             if (!(await confirmBox('Delete the “' + String(tag.name || 'Tag') + '” tag from all users?', 'Delete tag', true))) return;
             const updates = { ['customTags/' + id]: null };
             Object.keys(S.userTags).forEach(userId => {
               if (S.userTags[userId] && S.userTags[userId][id]) updates['userTags/' + userId + '/' + id] = null;
             });
             try { await db.ref().update(updates); toast('Tag deleted'); }
-            catch (e) { toast('Could not delete tag', true); }
+            catch (e) { reportDbFailure('Delete tag', e); }
           };
           savedList.append(el('div', { class: 'tag-card' },
             el('div', { class: 'tag-saved-head' }, sample, el('span', { class: 'grow' }),
@@ -1566,6 +1890,59 @@
       on('customTags', fn); detach.push(() => { handlers.customTags = (handlers.customTags || []).filter(f => f !== fn); });
       renderSaved();
       paintCreatePreview();
+    }
+
+    function publicSettingsTab() {
+      const background = el('input', { class: 'input appearance-color', type: 'color', value: appearanceColor(S.publicSettings.background) || '#000000', 'aria-label': 'Public background color' });
+      const iconUrl = el('input', { class: 'input', type: 'url', placeholder: 'https://example.com/icon.png', value: typeof S.publicSettings.favicon === 'string' && S.publicSettings.favicon !== 'default' ? S.publicSettings.favicon : '' });
+      const iconFile = el('input', { type: 'file', accept: 'image/*', class: 'hidden' });
+      const iconUpload = el('button', { class: 'btn sm', type: 'button' }, 'Choose image');
+      const font = el('select', { class: 'select', 'aria-label': 'Public font' }, [
+        el('option', { value: 'default' }, 'Default font'), el('option', { value: 'pusab' }, 'Pusab')
+      ]);
+      font.value = S.publicSettings.font === 'pusab' ? 'pusab' : 'default';
+      const status = el('div', { class: 'muted', style: 'font-size:12.5px' }, 'Changes apply to visitors in real time.');
+      const reset = el('button', { class: 'btn sm ghost', type: 'button' }, 'Reset public settings');
+      let timer = null;
+      const save = async values => {
+        status.textContent = 'Saving…';
+        if (!staffWriteAllowed()) { status.textContent = 'Only the authenticated owner or an authenticated admin can save public settings.'; return; }
+        try { await db.ref('publicSettings').update(values); status.textContent = 'Saved · visitors receive the change in real time.'; }
+        catch (e) { console.error('Orbit public appearance save failed:', e); status.textContent = 'Save failed: ' + (e.message || 'permission denied'); toast('Could not save public settings: ' + (e.message || 'permission denied'), true); }
+      };
+      const saveBackground = () => { clearTimeout(timer); timer = setTimeout(() => save({ background: background.value }), 250); };
+      background.addEventListener('input', saveBackground);
+      font.addEventListener('change', () => save({ font: font.value }));
+      iconUpload.onclick = () => iconFile.click();
+      iconUrl.addEventListener('change', () => {
+        const value = iconUrl.value.trim();
+        if (!value) return save({ favicon: null });
+        const valid = appearanceImage(value);
+        if (!valid) { toast('Enter a valid http or https image URL', true); return; }
+        save({ favicon: valid });
+      });
+      iconFile.onchange = async () => {
+        const file = iconFile.files && iconFile.files[0]; iconFile.value = '';
+        if (!file) return;
+        try {
+          const value = await processAvatar(file);
+          if (!appearanceImage(value)) throw new Error('That image is too large for a browser tab icon');
+          iconUrl.value = '';
+          await save({ favicon: value });
+        } catch (e) { toast(e.message || 'Could not use that image', true); }
+      };
+      reset.onclick = async () => {
+        clearTimeout(timer);
+        background.value = '#000000'; iconUrl.value = ''; font.value = 'default';
+        await save({ background: null, favicon: null, font: null });
+      };
+      const publicSettingsBody = el('div', { class: 'public-settings-form' },
+        el('div', { class: 'muted', style: 'font-size:13px' }, 'Set the site-wide defaults for background color, browser tab icon, and font. Connected visitors update immediately.'),
+        el('div', { class: 'public-setting-row' }, el('div', null, el('strong', null, 'Background color'), el('div', { class: 'muted', style: 'font-size:12px;margin-top:3px' }, 'Page background for everyone.')), background),
+        el('div', { class: 'public-setting-row' }, el('div', null, el('strong', null, 'Tab icon'), el('div', { class: 'muted', style: 'font-size:12px;margin-top:3px' }, 'Upload a small image or use an image URL.')), el('div', { class: 'appearance-icon-controls' }, iconUrl, iconFile, iconUpload)),
+        el('div', { class: 'public-setting-row' }, el('div', null, el('strong', null, 'Font'), el('div', { class: 'muted', style: 'font-size:12px;margin-top:3px' }, 'Default font or Pusab.')), font),
+        el('div', { class: 'public-setting-actions' }, status, el('span', { class: 'grow' }), reset));
+      content.append(publicSettingsBody);
     }
 
     function announcementsTab() {
@@ -1618,7 +1995,7 @@
           el('span', null, 'Currently live · ends in ' + fmtDur(remaining)),
           el('button', { class: 'btn sm danger', onclick: async () => {
             try { await db.ref('announcement').remove(); toast('Announcement ended'); }
-            catch (e) { toast('Could not end announcement', true); }
+            catch (e) { reportDbFailure('End announcement', e); }
           } }, 'End announcement')),
           message);
       };
@@ -1628,6 +2005,7 @@
       const tick = setInterval(renderActive, 1000); detach.push(() => clearInterval(tick));
 
       async function sendAnnouncement() {
+        if (!staffWriteAllowed()) return;
         const text = textIn.value.trim();
         const amount = Number(durationIn.value);
         const units = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
@@ -1648,7 +2026,7 @@
           });
           textIn.value = ''; charCount.textContent = '0 / 500'; updatePreview();
           toast('Announcement sent to everyone');
-        } catch (e) { toast('Could not send announcement', true); }
+        } catch (e) { reportDbFailure('Send announcement', e); }
         finally { sendBtn.disabled = false; }
       }
 
@@ -1685,13 +2063,14 @@
       const m = modal({ title: 'Tags · ' + userName, body, foot: [
         el('button', { class: 'btn sm', onclick: () => m.close() }, 'Cancel'),
         el('button', { class: 'btn sm primary', onclick: async () => {
+          if (!staffWriteAllowed()) return;
           try {
             const assignments = {};
             selected.forEach(tagId => { assignments[tagId] = true; });
             if (Object.keys(assignments).length) await db.ref('userTags/' + id).set(assignments);
             else await db.ref('userTags/' + id).remove();
             m.close(); toast('User tags updated');
-          } catch (e) { toast('Could not update user tags', true); }
+          } catch (e) { reportDbFailure('Update user tags', e); }
         } }, 'Save tags')
       ] });
       drawChoices();
@@ -1699,16 +2078,60 @@
 
     function chatTab() {
       const list = el('div');
+      const lockdownBtn = el('button', { class: 'btn sm danger', type: 'button' });
+      const slowMode = el('select', { class: 'select chat-slow-mode', 'aria-label': 'Public chat slow mode' }, [
+        el('option', { value: '0' }, 'Off'), el('option', { value: '2000' }, '2 seconds'),
+        el('option', { value: '5000' }, '5 seconds'), el('option', { value: '10000' }, '10 seconds')
+      ]);
+      const autoLock = el('input', { type: 'checkbox' });
+      const protectionStatus = el('div', { class: 'chat-protection-status' });
+      const protectionCard = el('div', { class: 'tag-card chat-protection-card' },
+        el('div', { class: 'chat-protection-head' },
+          el('div', null, el('strong', null, 'Raid protection'), el('div', { class: 'sub' }, 'Lock all public chat channels during a flood. The database rules enforce lockdown.')),
+          lockdownBtn),
+        el('div', { class: 'chat-protection-options' },
+          el('label', { class: 'chat-protection-option' }, el('span', null, 'Slow mode'), slowMode),
+          el('label', { class: 'chat-protection-option chat-auto-lock' }, autoLock, el('span', null, 'Automatically lock after 10 new messages arrive within 5 seconds while an authenticated owner or admin is connected.'))),
+        protectionStatus);
+      const drawProtection = () => {
+        const settings = S.chatSettings || {};
+        const locked = settings.lockdown === true;
+        const allowed = canManageChatSettings();
+        lockdownBtn.textContent = locked ? 'Unlock public chat' : 'Lock public chat';
+        lockdownBtn.classList.toggle('primary', !locked);
+        lockdownBtn.classList.toggle('danger', locked);
+        lockdownBtn.disabled = !allowed;
+        slowMode.value = String([0, 2000, 5000, 10000].includes(Number(settings.slowModeMs)) ? Number(settings.slowModeMs) : 2000);
+        slowMode.disabled = !allowed;
+        autoLock.checked = settings.autoLock !== false;
+        autoLock.disabled = !allowed;
+        protectionStatus.textContent = locked
+          ? (settings.autoLocked ? 'Public chat is locked automatically after a message burst.' : 'Public chat is locked by a moderator.')
+          : allowed ? 'Public chat is open.' : 'Sign in with an authorized owner/admin account to change protection settings.';
+      };
+      lockdownBtn.onclick = async () => {
+        const locking = S.chatSettings.lockdown !== true;
+        const ok = await updateChatSettings({
+          lockdown: locking, lockdownAt: locking ? TS : null,
+          lockdownBy: locking ? uid : null, autoLocked: false
+        });
+        if (ok) toast(locking ? 'Public chat locked' : 'Public chat unlocked');
+      };
+      slowMode.onchange = () => updateChatSettings({ slowModeMs: Number(slowMode.value) });
+      autoLock.onchange = () => updateChatSettings({ autoLock: autoLock.checked });
+      on('change', drawProtection); detach.push(() => { handlers.change = (handlers.change || []).filter(fn => fn !== drawProtection); });
+      drawProtection();
       if (owner) {
         content.append(el('div', { style: 'display:flex;justify-content:flex-end;margin-bottom:10px' },
           el('button', {
             class: 'btn sm danger', onclick: async () => {
               if (!(await confirmBox('Delete every chat message? This cannot be undone.', 'Clear chat', true))) return;
-              await db.ref('messages').remove(); toast('Chat cleared');
+              try { await db.ref('messages').remove(); toast('Chat cleared'); }
+              catch (e) { reportDbFailure('Clear chat', e); }
             }
           }, 'Clear all chat')));
       }
-      content.append(list);
+      content.append(protectionCard, list);
       const ref = db.ref('messages').limitToLast(150);
       const cb = ref.on('value', snap => {
         const items = []; snap.forEach(c => { items.push([c.key, c.val()]); });
@@ -1788,7 +2211,8 @@
   window.Orbit = {
     db, TS, now, uid, S, I, el, esc, $, ls,
     on, off, emit, ready, init, dm, staffTag,
-    me, user, isOwner, isAdmin, ownerUnlocked, isBanned, timeoutLeft, isOnline, userByName, canModerate, canAct,
+    me, user, isOwner, isAdmin, ownerUnlocked, isBanned, timeoutLeft, isOnline, onlineCount, userByName, canModerate, canAct,
+    canManageChatSettings, updateChatSettings,
     toast, modal, confirmBox, promptText, chooseDuration,
     messageTools, playMessageSound, notifyIncoming,
     EMOJI_IDS, isEmoji, emojiUrl, emojiImg, openPicker, closePicker,

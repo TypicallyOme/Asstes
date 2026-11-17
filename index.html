@@ -67,7 +67,7 @@
   <script>
     Orbit.init({ page: 'home' });
     const render = () => {
-      document.getElementById('online').textContent = Object.keys(Orbit.S.presence).length;
+      document.getElementById('online').textContent = Orbit.onlineCount();
       document.getElementById('members').textContent = Object.keys(Orbit.S.users).filter(id => Orbit.user(id)).length;
       const w = document.getElementById('welcome');
       w.innerHTML = '';

@@ -37,7 +37,6 @@
     .nt-embed-editor { margin-top: 10px; padding: 12px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--bg-2); }
     .nt-embed-panel label { display: block; font-size: 12px; color: var(--text-2); margin: 0 0 6px; }
     .nt-embed-panel input, .nt-embed-panel textarea { width: 100%; border: 1px solid var(--line-2); border-radius: 9px; background: var(--surface-2); padding: 9px 10px; outline: none; }
-    .nt-embed-panel textarea { min-height: 120px; resize: vertical; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
     .nt-embed-hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
     .nt-embed-toggle.on { border-color: #fff; color: #fff; background: #ffffff12; }
     .nt-embed-toggle svg { width: 18px; height: 18px; }
@@ -150,11 +149,6 @@
               <input id="ntEmbedUrl" type="url" maxlength="2048" placeholder="https://example.com">
               <div class="nt-embed-hint">Some websites block being shown inside an iframe.</div>
             </div>
-            <div class="nt-embed-panel hidden" id="ntEmbedHtmlPane">
-              <label for="ntEmbedHtml">HTML code</label>
-              <textarea id="ntEmbedHtml" maxlength="20000" spellcheck="false" placeholder="Paste HTML code here"></textarea>
-              <div class="nt-embed-hint">HTML runs in a sandboxed iframe, separate from Orbit.</div>
-            </div>
             <div class="nt-embed-clear-row"><button class="btn sm ghost hidden" id="ntEmbedClear" type="button">Clear embed</button></div>
           </div>
           <div class="blocked-note hidden" id="ntBlocked"></div>
@@ -162,7 +156,6 @@
             <button class="icon-btn" id="ntAttach" type="button" title="Add images, audio or video"></button>
             <button class="icon-btn" id="ntEmoji" type="button" title="Emojis"></button>
             <button class="icon-btn nt-embed-toggle" id="ntEmbedUrlBtn" type="button" title="Embed a link in an iframe" aria-label="Embed a link in an iframe"></button>
-            <button class="icon-btn nt-embed-toggle" id="ntEmbedHtmlBtn" type="button" title="Embed HTML code" aria-label="Embed HTML code"></button>
             <input type="file" id="ntFile" class="hidden" multiple>
             <span class="grow"></span>
             <span class="count" id="ntCount"></span>

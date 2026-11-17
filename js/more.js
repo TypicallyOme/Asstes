@@ -58,13 +58,6 @@
     } catch (e) { return null; }
   }
 
-  const ratios = [
-    ['Square · 1:1', '1 / 1'],
-    ['Compact · 5:4', '5 / 4'],
-    ['Classic · 4:3', '4 / 3'],
-    ['Landscape · 3:2', '3 / 2'],
-    ['Portrait · 4:5', '4 / 5']
-  ];
   const canManageCard = card => !!card && (O.isAdmin() || card.createdBy === O.uid);
 
   function getImageSource(image) {
@@ -99,8 +92,7 @@
     empty.classList.toggle('hidden', items.length > 0);
     items.forEach(([id, card]) => {
       const shell = el('article', { class: 'more-card-shell no-image' });
-      const ratio = ratios.some(([, value]) => value === card.ratio) ? card.ratio : '4 / 3';
-      shell.style.aspectRatio = ratio;
+      shell.style.aspectRatio = '1 / 1';
       const image = el('img', { alt: '', loading: 'lazy', draggable: 'false' });
       image.onerror = () => { image.remove(); shell.classList.add('no-image'); };
       const titleNode = O.richEl(String(card.title || 'Untitled').slice(0, 60), 'span');
@@ -144,14 +136,26 @@
     const titleIn = el('input', { class: 'input', maxlength: 60, placeholder: 'Box title', value: card.title || '' });
     const titleEmoji = el('button', { type: 'button', class: 'icon-btn more-emoji-btn', title: 'Add emoji', html: I.smile });
     titleEmoji.onclick = () => insertEmoji(titleIn, titleEmoji);
-    const ratioIn = el('select', { class: 'input', 'aria-label': 'Box shape' });
-    ratios.forEach(([label, value]) => ratioIn.append(el('option', { value }, label)));
-    ratioIn.value = ratios.some(([, value]) => value === card.ratio) ? card.ratio : '4 / 3';
     const textIn = el('textarea', { class: 'textarea', maxlength: 180, rows: 3, placeholder: 'Text revealed when someone hovers over the box' });
     textIn.value = card.text || '';
     const textEmoji = el('button', { type: 'button', class: 'icon-btn more-emoji-btn', title: 'Add emoji', html: I.smile });
     textEmoji.onclick = () => insertEmoji(textIn, textEmoji);
+    const htmlEmbed = card.embed && card.embed.type === 'html' && typeof card.embed.html === 'string' ? card.embed.html : '';
     const urlIn = el('input', { class: 'input', maxlength: 2048, type: 'url', placeholder: 'https://example.com', value: card.url || '' });
+    const htmlIn = el('textarea', { class: 'textarea archive-embed-html', maxlength: 20000, rows: 8, spellcheck: 'false', placeholder: 'Paste HTML code here' }, htmlEmbed);
+    htmlIn.value = htmlEmbed;
+    const urlBtn = el('button', { type: 'button', class: 'btn sm' }, 'Hyperlink');
+    const htmlBtn = el('button', { type: 'button', class: 'btn sm' }, 'HTML code');
+    let embedMode = htmlEmbed ? 'html' : 'url';
+    const setEmbedMode = mode => {
+      embedMode = mode;
+      urlIn.classList.toggle('hidden', mode !== 'url');
+      htmlIn.classList.toggle('hidden', mode !== 'html');
+      urlBtn.classList.toggle('primary', mode === 'url');
+      htmlBtn.classList.toggle('primary', mode === 'html');
+    };
+    urlBtn.onclick = () => setEmbedMode('url');
+    htmlBtn.onclick = () => setEmbedMode('html');
     const imageUrl = typeof card.image === 'string' ? card.image : (card.image && card.image.url) || '';
     const imageUrlIn = el('input', { class: 'input', maxlength: 2048, type: 'url', placeholder: 'Optional image URL', value: imageUrl });
     const fileIn = el('input', { type: 'file', accept: 'image/*', class: 'hidden' });
@@ -173,9 +177,11 @@
     const body = el('div', { class: 'more-editor-form' },
       el('label', { class: 'label' }, 'Title'), el('div', { class: 'more-emoji-input' }, titleIn, titleEmoji),
       el('label', { class: 'label' }, 'Hover text'), el('div', { class: 'more-emoji-input' }, textIn, textEmoji),
-      el('label', { class: 'label' }, 'Box shape'), ratioIn,
-      el('label', { class: 'label' }, 'Hyperlink'), urlIn,
+      el('label', { class: 'label' }, 'Box content'), el('div', { class: 'archive-embed-switch' }, urlBtn, htmlBtn),
+      urlIn, htmlIn,
+      el('div', { class: 'muted archive-embed-hint' }, 'HTML runs in a sandboxed iframe, separate from Orbit.'),
       el('label', { class: 'label' }, 'Image URL or upload'), imageUrlIn, imageControls);
+    setEmbedMode(embedMode);
     const dialog = O.modal({ title: id ? 'Edit Archive box' : 'Create Archive box', body, foot: [cancelBtn, saveBtn], wide: true, onClose: () => {
       editorClosed = true;
       if (!saved && uploadedImage) O.deleteFiles([uploadedImage]);
@@ -211,9 +217,17 @@
     async function saveCard() {
       if (uploadBusy) return O.toast('Wait for the image upload to finish');
       const title = titleIn.value.trim();
-      const url = webUrl(urlIn.value);
       if (!title) { O.toast('Enter a title for the box', true); titleIn.focus(); return; }
-      if (!url) { O.toast('Enter a valid http or https hyperlink', true); urlIn.focus(); return; }
+      let url = null, embed = null;
+      if (embedMode === 'html') {
+        const html = htmlIn.value.trim();
+        if (!html) { O.toast('Paste HTML code to embed', true); htmlIn.focus(); return; }
+        if (html.length > 20000) { O.toast('HTML embeds can be up to 20,000 characters', true); htmlIn.focus(); return; }
+        embed = { type: 'html', html };
+      } else {
+        url = webUrl(urlIn.value);
+        if (!url) { O.toast('Enter a valid http or https hyperlink', true); urlIn.focus(); return; }
+      }
       const imageValue = imageUrlIn.value.trim();
       let image = uploadedImage || (removeExistingImage ? null : oldImage);
       if (imageValue) {
@@ -223,7 +237,8 @@
       }
       const record = {
         title: title.slice(0, 60), text: textIn.value.trim().slice(0, 180), url,
-        image: image || null, ratio: ratioIn.value, order: Number(card.order) || Date.now(),
+        embed,
+        image: image || null, ratio: '1 / 1', order: Number(card.order) || Date.now(),
         createdBy: card.createdBy || O.uid, createdAt: card.createdAt || O.TS, updatedAt: O.TS
       };
       const ref = id ? db.ref('moreCards/' + id) : db.ref('moreCards').push();
@@ -315,10 +330,26 @@
   }
 
   function openViewer(card) {
+    const html = card && card.embed && card.embed.type === 'html' && typeof card.embed.html === 'string' && card.embed.html.length <= 20000
+      ? card.embed.html : null;
+    if (html !== null && html.trim()) {
+      currentCard = { title: String(card.title || 'HTML preview'), type: 'html', html };
+      viewerTitle.textContent = currentCard.title;
+      viewerFrame.removeAttribute('src');
+      viewerFrame.setAttribute('sandbox', 'allow-scripts allow-forms');
+      viewerFrame.srcdoc = html;
+      viewer.classList.remove('hidden');
+      pageOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      viewerClose.focus();
+      return;
+    }
     const url = webUrl(card && card.url);
     if (!url) return O.toast('This box has an invalid hyperlink', true);
-    currentCard = { title: String(card.title || 'Link preview'), url };
+    currentCard = { title: String(card.title || 'Link preview'), type: 'url', url };
     viewerTitle.textContent = currentCard.title;
+    viewerFrame.removeAttribute('sandbox');
+    viewerFrame.removeAttribute('srcdoc');
     viewerFrame.src = url;
     viewer.classList.remove('hidden');
     pageOverflow = document.body.style.overflow;
@@ -330,6 +361,8 @@
     if (viewer.classList.contains('hidden')) return;
     if (document.fullscreenElement === viewerPanel && document.exitFullscreen) document.exitFullscreen().catch(() => {});
     viewer.classList.add('hidden');
+    viewerFrame.removeAttribute('srcdoc');
+    viewerFrame.removeAttribute('sandbox');
     viewerFrame.src = 'about:blank';
     document.body.style.overflow = pageOverflow;
     currentCard = null;
@@ -338,9 +371,17 @@
 
   function refreshViewer() {
     if (!currentCard) return;
-    const url = currentCard.url;
+    const active = currentCard;
+    viewerFrame.removeAttribute('srcdoc');
+    viewerFrame.removeAttribute('sandbox');
     viewerFrame.src = 'about:blank';
-    requestAnimationFrame(() => { if (currentCard && currentCard.url === url) viewerFrame.src = url; });
+    requestAnimationFrame(() => {
+      if (currentCard !== active) return;
+      if (active.type === 'html') {
+        viewerFrame.setAttribute('sandbox', 'allow-scripts allow-forms');
+        viewerFrame.srcdoc = active.html;
+      } else viewerFrame.src = active.url;
+    });
   }
 
   function openInBlank() {
@@ -352,11 +393,14 @@
     doc.body.style.cssText = 'margin:0;background:#111;overflow:hidden;';
     const frame = doc.createElement('iframe');
     frame.title = currentCard.title;
-    frame.src = currentCard.url;
     frame.allow = 'fullscreen; autoplay; encrypted-media';
     frame.allowFullscreen = true;
     frame.referrerPolicy = 'no-referrer';
     frame.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;border:0;background:#111;';
+    if (currentCard.type === 'html') {
+      frame.setAttribute('sandbox', 'allow-scripts allow-forms');
+      frame.srcdoc = currentCard.html;
+    } else frame.src = currentCard.url;
     doc.body.append(frame);
   }
 

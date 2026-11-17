@@ -19,6 +19,7 @@
    */
   O.Conversation = function (opts) {
     const msgPath = opts.msgPath;
+    const publicChat = msgPath === 'messages' || msgPath.indexOf('channelMessages/') === 0 || msgPath.indexOf('omegleRooms/') === 0;
     const placeholder = opts.placeholder || 'Message';
     const cleanups = [];
     const listen = (evt, fn) => { O.on(evt, fn); cleanups.push(() => O.off(evt, fn)); };
@@ -51,6 +52,36 @@
     const nodes = new Map();
     let limit = 200, query = null, initialLoaded = false, stick = true;
     let replyTo = null, pending = [], pendingJump = null, pendingScrollTo = null, destroyed = false;
+    let chatLocked = false;
+    const burstTimes = [];
+    let autoLockPending = false;
+
+    function lockAfterBurst() {
+      if (!publicChat || O.S.chatSettings.autoLock === false || O.S.chatSettings.lockdown === true || autoLockPending || !O.canManageChatSettings()) return;
+      autoLockPending = true;
+      O.updateChatSettings({ lockdown: true, lockdownAt: TS, lockdownBy: uid, autoLocked: true })
+        .then(ok => { if (ok) O.toast('Rapid message flood detected. Public chat locked automatically.'); })
+        .finally(() => { autoLockPending = false; });
+    }
+
+    function checkMessageBurst() {
+      if (!publicChat || O.S.chatSettings.autoLock === false || O.S.chatSettings.lockdown === true || autoLockPending || !O.canManageChatSettings()) return;
+      const time = Date.now();
+      burstTimes.push(time);
+      while (burstTimes.length && time - burstTimes[0] > 5000) burstTimes.shift();
+      if (burstTimes.length >= 10) lockAfterBurst();
+    }
+
+    function checkInitialBurst(snapshot) {
+      if (!publicChat || O.S.chatSettings.autoLock === false || O.S.chatSettings.lockdown === true || !O.canManageChatSettings()) return;
+      const now = Date.now();
+      let recent = 0;
+      snapshot.forEach(child => {
+        const ts = Number(child.child('ts').val());
+        if (Number.isFinite(ts) && ts >= now - 5000 && ts <= now + 1000) recent++;
+      });
+      if (recent >= 10) lockAfterBurst();
+    }
 
     function subscribe() {
       if (query) query.off();
@@ -61,6 +92,7 @@
       q.on('child_added', s => {
         const m = s.val(); if (!m) return;
         msgs.set(s.key, m);
+        if (initialLoaded) checkMessageBurst();
         if (initialLoaded && m.uid !== uid) {
           if (opts.onIncoming) opts.onIncoming(m, s.key);
           if (!opts.anonymous && O.mentionsMe(m.text)) { const n = O.user(m.uid); O.toast((n ? n.name : 'Someone') + ' mentioned you'); }
@@ -73,6 +105,7 @@
       q.once('value', s => {
         if (query !== q) return;
         initialLoaded = true;
+        checkInitialBurst(s);
         olderWrap.classList.toggle('hidden', s.numChildren() < limit);
         schedule(true);
         opts.onActivity && opts.onActivity();
@@ -428,17 +461,25 @@
     function autosize() { input.style.height = 'auto'; input.style.height = Math.min(160, input.scrollHeight) + 'px'; }
     function updateSend() {
       const uploading = pending.some(p => p.status === 'uploading');
-      sendBtn.disabled = uploading || !(input.value.trim() || pending.some(p => p.att));
+      sendBtn.disabled = uploading || chatLocked || !(input.value.trim() || pending.some(p => p.att));
     }
     let lastSend = 0;
     async function send() {
       if (!O.canAct()) return;
+      if (chatLocked) return O.toast('Public chat is locked by a moderator', true);
       if (pending.some(p => p.status === 'uploading')) return O.toast('Wait for uploads to finish');
       const text = input.value.trim().slice(0, 4000);
       const atts = pending.filter(p => p.att).map(p => p.att);
       if (!text && !atts.length) return;
-      if (Date.now() - lastSend < 700) return;
-      lastSend = Date.now();
+      const sendTime = Date.now();
+      const configuredSlowMode = Number(O.S.chatSettings.slowModeMs);
+      const slowModeMs = [0, 2000, 5000, 10000].includes(configuredSlowMode) ? configuredSlowMode : 2000;
+      const minimumDelay = publicChat ? Math.max(700, slowModeMs) : 700;
+      if (sendTime - lastSend < minimumDelay) {
+        const wait = Math.max(1, Math.ceil((minimumDelay - (sendTime - lastSend)) / 1000));
+        return O.toast('Slow mode: wait ' + wait + ' second' + (wait === 1 ? '' : 's'), true);
+      }
+      lastSend = sendTime;
       const msg = { uid, text, ts: TS };
       if (atts.length) msg.attachments = atts;
       if (replyTo) msg.replyTo = replyTo;
@@ -461,11 +502,14 @@
 
     function composerState() {
       const left = O.timeoutLeft();
-      const blocked = left > 0 || O.isBanned();
+      const banned = O.isBanned(), timedOut = left > 0;
+      chatLocked = publicChat && O.S.chatSettings.lockdown === true && !O.canManageChatSettings();
+      const blocked = timedOut || banned || chatLocked;
       timeoutNote.classList.toggle('hidden', !blocked);
-      if (blocked) timeoutNote.textContent = O.isBanned() ? 'You are banned.' : 'You are timed out — you can chat again in ' + O.fmtDur(left) + '.';
+      if (blocked) timeoutNote.textContent = banned ? 'You are banned.' : timedOut ? 'You are timed out — you can chat again in ' + O.fmtDur(left) + '.' : 'Public chat is temporarily locked by a moderator.';
       input.disabled = blocked; attachBtn.disabled = blocked; emojiBtn.disabled = blocked;
       input.placeholder = blocked ? 'You can’t send messages right now' : placeholder;
+      updateSend();
     }
     listen('change', composerState);
     every(composerState, 1000);

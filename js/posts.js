@@ -5,15 +5,15 @@
 
   O.init({ page: 'posts', require: true });
   O.$('#onlinePill').onclick = O.openMembers;
-  O.on('change', () => { O.$('#onlineCount').textContent = Object.keys(O.S.presence).length; });
+  O.on('change', () => { O.$('#onlineCount').textContent = O.onlineCount(); });
 
   const ntText = O.$('#ntText'), ntPost = O.$('#ntPost'), ntAttach = O.$('#ntAttach'), ntEmoji = O.$('#ntEmoji');
   const ntTitle = O.$('#ntTitle');
-  const ntEmbedEditor = O.$('#ntEmbedEditor'), ntEmbedUrlPane = O.$('#ntEmbedUrlPane'), ntEmbedHtmlPane = O.$('#ntEmbedHtmlPane');
-  const ntEmbedUrl = O.$('#ntEmbedUrl'), ntEmbedHtml = O.$('#ntEmbedHtml');
-  const ntEmbedUrlBtn = O.$('#ntEmbedUrlBtn'), ntEmbedHtmlBtn = O.$('#ntEmbedHtmlBtn'), ntEmbedClear = O.$('#ntEmbedClear');
+  const ntEmbedEditor = O.$('#ntEmbedEditor'), ntEmbedUrlPane = O.$('#ntEmbedUrlPane');
+  const ntEmbedUrl = O.$('#ntEmbedUrl');
+  const ntEmbedUrlBtn = O.$('#ntEmbedUrlBtn'), ntEmbedClear = O.$('#ntEmbedClear');
   const ntFile = O.$('#ntFile'), ntPending = O.$('#ntPending'), ntCount = O.$('#ntCount'), ntBlocked = O.$('#ntBlocked');
-  ntAttach.innerHTML = I.clip; ntEmoji.innerHTML = I.smile; ntEmbedUrlBtn.innerHTML = I.share; ntEmbedHtmlBtn.innerHTML = I.edit; ntFile.accept = O.ACCEPT;
+  ntAttach.innerHTML = I.clip; ntEmoji.innerHTML = I.smile; ntEmbedUrlBtn.innerHTML = I.share; ntFile.accept = O.ACCEPT;
   let pending = [];
   let embedMode = null;
 
@@ -28,8 +28,8 @@
     ntBlocked.classList.toggle('hidden', !blocked);
     if (blocked) ntBlocked.textContent = O.isBanned() ? 'You are banned.' : 'You are timed out — you can post again in ' + O.fmtDur(left) + '.';
     ntText.disabled = blocked; ntTitle.disabled = blocked; ntAttach.disabled = blocked; ntEmoji.disabled = blocked;
-    ntEmbedUrlBtn.disabled = blocked; ntEmbedHtmlBtn.disabled = blocked; ntEmbedClear.disabled = blocked;
-    ntEmbedUrl.disabled = blocked; ntEmbedHtml.disabled = blocked;
+    ntEmbedUrlBtn.disabled = blocked; ntEmbedClear.disabled = blocked;
+    ntEmbedUrl.disabled = blocked;
     updatePostBtn();
   }
   O.on('change', paintComposer);
@@ -38,7 +38,7 @@
   function autosize(t) { t.style.height = 'auto'; t.style.height = Math.min(320, t.scrollHeight) + 'px'; }
   function updatePostBtn() {
     const uploading = pending.some(p => p.status === 'uploading');
-    const hasEmbed = (embedMode === 'url' && ntEmbedUrl.value.trim()) || (embedMode === 'html' && ntEmbedHtml.value.trim());
+    const hasEmbed = embedMode === 'url' && ntEmbedUrl.value.trim();
     const has = ntText.value.trim() || pending.some(p => p.att) || hasEmbed;
     ntPost.disabled = uploading || !has || ntText.disabled;
     const len = ntText.value.length;
@@ -48,17 +48,13 @@
     embedMode = mode;
     ntEmbedEditor.classList.toggle('hidden', !mode);
     ntEmbedUrlPane.classList.toggle('hidden', mode !== 'url');
-    ntEmbedHtmlPane.classList.toggle('hidden', mode !== 'html');
     ntEmbedUrlBtn.classList.toggle('on', mode === 'url');
-    ntEmbedHtmlBtn.classList.toggle('on', mode === 'html');
     ntEmbedClear.classList.toggle('hidden', !mode);
     updatePostBtn();
   }
   ntEmbedUrlBtn.onclick = () => setEmbedMode(embedMode === 'url' ? null : 'url');
-  ntEmbedHtmlBtn.onclick = () => setEmbedMode(embedMode === 'html' ? null : 'html');
-  ntEmbedClear.onclick = () => { ntEmbedUrl.value = ''; ntEmbedHtml.value = ''; setEmbedMode(null); };
+  ntEmbedClear.onclick = () => { ntEmbedUrl.value = ''; setEmbedMode(null); };
   ntEmbedUrl.addEventListener('input', updatePostBtn);
-  ntEmbedHtml.addEventListener('input', updatePostBtn);
 
   ntText.addEventListener('input', () => { autosize(ntText); updatePostBtn(); });
   ntText.addEventListener('focus', () => { if (!O.me()) O.openProfile({ setup: true }); });
@@ -124,11 +120,6 @@
         if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid');
         embed = { type: 'url', url: url.href };
       } catch (e) { O.toast('Enter a valid http or https URL to embed', true); ntEmbedUrl.focus(); return; }
-    } else if (embedMode === 'html') {
-      const html = ntEmbedHtml.value.trim();
-      if (!html) { O.toast('Paste HTML code to embed', true); ntEmbedHtml.focus(); return; }
-      if (html.length > 20000) { O.toast('HTML embeds can be up to 20,000 characters', true); ntEmbedHtml.focus(); return; }
-      embed = { type: 'html', html };
     }
     if (!text && !atts.length && !embed) return;
     if (Date.now() - lastPost < 3000) return O.toast('Slow down a little');
@@ -142,7 +133,7 @@
     try {
       await db.ref('posts').push(post);
       pending.forEach(p => URL.revokeObjectURL(p.preview));
-      ntText.value = ''; ntTitle.value = ''; ntEmbedUrl.value = ''; ntEmbedHtml.value = ''; setEmbedMode(null); pending = []; drawPending(); autosize(ntText);
+      ntText.value = ''; ntTitle.value = ''; ntEmbedUrl.value = ''; setEmbedMode(null); pending = []; drawPending(); autosize(ntText);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (e) { O.toast('Could not post: ' + e.message, true); }
     updatePostBtn();
