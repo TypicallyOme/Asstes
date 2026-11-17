@@ -39,7 +39,7 @@
       "$channel": {
         ".indexOn": ["ts"],
         "$id": {
-          ".write": "(!data.exists() && root.child('chatSettings').child('lockdown').val() !== true) || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
+          ".write": "(!data.exists() && $channel === 'anonymous' && root.child('chatSettings').child('lockdown').val() !== true && newData.child('uid').isString() && newData.child('uid').val().matches(/^[A-Za-z0-9_-]{8,40}$/) && root.child('users').child(newData.child('uid').val()).exists() && root.child('mod').child(newData.child('uid').val()).child('banned').val() !== true && (!root.child('mod').child(newData.child('uid').val()).child('timeoutUntil').exists() || root.child('mod').child(newData.child('uid').val()).child('timeoutUntil').val() <= now)) || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
           "reactions": { ".write": true },
           "ts": { ".validate": "newData.isNumber() && newData.val() <= now && newData.val() >= now - 60000" },
           "text": { ".validate": "newData.isString() && newData.val().length <= 4000" }
@@ -54,7 +54,7 @@
       "$room": {
         ".indexOn": ["ts"],
         "$id": {
-          ".write": "(!data.exists() && root.child('chatSettings').child('lockdown').val() !== true) || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
+          ".write": "(!data.exists() && root.child('chatSettings').child('lockdown').val() !== true && newData.child('uid').isString() && newData.child('uid').val().matches(/^[A-Za-z0-9_-]{8,40}$/) && root.child('users').child(newData.child('uid').val()).exists() && root.child('omegleSessions').child($room).child('members').child(newData.child('uid').val()).val() === true && root.child('mod').child(newData.child('uid').val()).child('banned').val() !== true && (!root.child('mod').child(newData.child('uid').val()).child('timeoutUntil').exists() || root.child('mod').child(newData.child('uid').val()).child('timeoutUntil').val() <= now)) || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
           "reactions": { ".write": true },
           "ts": { ".validate": "newData.isNumber() && newData.val() <= now && newData.val() >= now - 60000" },
           "text": { ".validate": "newData.isString() && newData.val().length <= 4000" }
@@ -71,7 +71,7 @@
       ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'",
       ".indexOn": ["ts"],
       "$id": {
-        ".write": "(!data.exists() && root.child('chatSettings').child('lockdown').val() !== true) || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
+        ".write": "(!data.exists() && root.child('chatSettings').child('lockdown').val() !== true && newData.child('uid').isString() && newData.child('uid').val().matches(/^[A-Za-z0-9_-]{8,40}$/) && root.child('users').child(newData.child('uid').val()).exists() && root.child('mod').child(newData.child('uid').val()).child('banned').val() !== true && (!root.child('mod').child(newData.child('uid').val()).child('timeoutUntil').exists() || root.child('mod').child(newData.child('uid').val()).child('timeoutUntil').val() <= now)) || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
         "reactions": { ".write": true },
         "ts": { ".validate": "newData.isNumber() && newData.val() <= now && newData.val() >= now - 60000" },
         "text": { ".validate": "newData.isString() && newData.val().length <= 4000" }
@@ -79,6 +79,7 @@
     },
     "posts": {
       ".read": true,
+      ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'",
       ".indexOn": ["ts"],
       "$id": {
         ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
@@ -91,6 +92,7 @@
     },
     "comments": {
       ".read": true,
+      ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'",
       "$postId": {
         "$id": {
           ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",

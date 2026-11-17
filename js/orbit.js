@@ -10,7 +10,13 @@
     messagingSenderId: "964534662601",
     appId: "1:964534662601:web:b067a00860f9e2f6d96418"
   };
+  // Public reCAPTCHA v3 site key for Firebase App Check.
+  const APP_CHECK_RECAPTCHA_SITE_KEY = '6Lc8MCQuAAAAAKPmPQAGUe973GjOzT6m7cnZaCQA';
   firebase.initializeApp(firebaseConfig);
+  if (APP_CHECK_RECAPTCHA_SITE_KEY) {
+    try { firebase.appCheck().activate(APP_CHECK_RECAPTCHA_SITE_KEY, true); }
+    catch (e) { console.error('Orbit: Firebase App Check could not start', e); }
+  }
   const auth = firebase.auth();
   const db = firebase.database();
   const TS = firebase.database.ServerValue.TIMESTAMP;
@@ -1451,7 +1457,10 @@
   }
   function staffWriteAllowed() {
     if (canManageChatSettings()) return true;
-    toast(isAdmin() ? 'Sign in with the Firebase account linked to this Orbit admin profile' : 'Not allowed', true);
+    if (isOwner() && !ownerUnlocked()) toast('Sign in to the owner Firebase account before using owner actions', true);
+    else if (isAdmin() && !auth.currentUser) toast('Sign in to the Firebase account linked to this admin profile', true);
+    else if (isAdmin()) toast('This Firebase account is not linked to your admin profile. Ask the owner to link its UID in the Users tab.', true);
+    else toast('Not allowed', true);
     return false;
   }
   function canManageChatSettings() {
@@ -2156,6 +2165,24 @@
 
     function postsTab() {
       const list = el('div');
+      if (owner) {
+        const clearAll = el('button', { class: 'btn sm danger', type: 'button', onclick: async () => {
+          if (!ownerUnlocked()) { toast('Sign in to the owner account before clearing posts', true); return; }
+          if (!(await confirmBox('Delete every post, all post comments, and their uploaded attachments? This cannot be undone.', 'Clear all posts', true))) return;
+          try {
+            const snapshot = await db.ref('posts').once('value');
+            const attachments = [];
+            snapshot.forEach(child => {
+              const post = child.val() || {};
+              if (post.attachments) attachments.push(...(Array.isArray(post.attachments) ? post.attachments : Object.values(post.attachments)));
+            });
+            await db.ref().update({ posts: null, comments: null });
+            deleteFiles(attachments);
+            toast('All posts and comments cleared');
+          } catch (e) { reportDbFailure('Clear all posts', e); }
+        } }, 'Clear all posts');
+        content.append(el('div', { style: 'display:flex;justify-content:flex-end;margin-bottom:10px' }, clearAll));
+      }
       content.append(list);
       const ref = db.ref('posts').limitToLast(100);
       const cb = ref.on('value', snap => {
