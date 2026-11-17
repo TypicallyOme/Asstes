@@ -24,9 +24,10 @@
     if (O.me()) n.append(O.nameTag(uid));
     else n.append(O.el('span', { class: 'muted' }, 'Create a profile to post'));
     const left = O.timeoutLeft();
-    const blocked = left > 0 || O.isBanned();
+    const paused = O.S.postSettings && O.S.postSettings.paused === true && !O.ownerUnlocked();
+    const blocked = left > 0 || O.isBanned() || paused;
     ntBlocked.classList.toggle('hidden', !blocked);
-    if (blocked) ntBlocked.textContent = O.isBanned() ? 'You are banned.' : 'You are timed out — you can post again in ' + O.fmtDur(left) + '.';
+    if (blocked) ntBlocked.textContent = O.isBanned() ? 'You are banned.' : paused ? 'Posting is paused by the owner. Only the owner can post right now.' : 'You are timed out — you can post again in ' + O.fmtDur(left) + '.';
     ntText.disabled = blocked; ntTitle.disabled = blocked; ntAttach.disabled = blocked; ntEmoji.disabled = blocked;
     ntEmbedUrlBtn.disabled = blocked; ntEmbedClear.disabled = blocked;
     ntEmbedUrl.disabled = blocked;
@@ -106,6 +107,7 @@
 
   let lastPost = 0;
   async function createPost() {
+    if (O.S.postSettings && O.S.postSettings.paused === true && !O.ownerUnlocked()) return O.toast('Posting is paused by the owner', true);
     if (!O.canAct()) return;
     if (pending.some(p => p.status === 'uploading')) return O.toast('Wait for uploads to finish');
     const text = ntText.value.trim().slice(0, 5000);

@@ -173,7 +173,7 @@
   let uid = ls.get('orbit_uid');
   if (!uid || !/^[A-Za-z0-9_-]{8,40}$/.test(uid)) { uid = db.ref().push().key; ls.set('orbit_uid', uid); }
 
-  const S = { users: {}, roles: {}, owners: {}, mod: {}, presence: {}, presenceSessions: {}, customTags: {}, userTags: {}, announcement: null, publicSettings: {}, chatSettings: {}, byName: {}, loaded: {} };
+  const S = { users: {}, roles: {}, owners: {}, mod: {}, presence: {}, presenceSessions: {}, customTags: {}, userTags: {}, announcement: null, publicSettings: {}, chatSettings: {}, postSettings: {}, byName: {}, loaded: {} };
   const localAppearanceKey = 'orbit_appearance';
   const defaultFavicon = 'favicon.png';
   function appearanceLocal() {
@@ -215,7 +215,7 @@
     changeQueued = true;
     requestAnimationFrame(() => { changeQueued = false; emit('change'); selfCheck(); });
   }
-  ['users', 'roles', 'owners', 'mod', 'presence', 'presenceSessions', 'customTags', 'userTags', 'announcement', 'publicSettings', 'chatSettings'].forEach(key => {
+  ['users', 'roles', 'owners', 'mod', 'presence', 'presenceSessions', 'customTags', 'userTags', 'announcement', 'publicSettings', 'chatSettings', 'postSettings'].forEach(key => {
     db.ref(key).on('value', snap => {
       S[key] = ['announcement'].includes(key) ? snap.val() : (snap.val() || {});
       if (key === 'users') {
@@ -2166,6 +2166,32 @@
     function postsTab() {
       const list = el('div');
       if (owner) {
+        const pauseButton = el('button', { class: 'btn sm', type: 'button' });
+        const pauseStatus = el('div', { class: 'sub', style: 'margin-top:6px' });
+        const pauseCard = el('div', { class: 'tag-card', style: 'margin-bottom:10px' },
+          el('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:12px' },
+            el('div', null, el('strong', null, 'Post publishing'), pauseStatus), pauseButton));
+        const drawPostPause = () => {
+          const paused = S.postSettings && S.postSettings.paused === true;
+          pauseButton.textContent = paused ? 'Resume posts' : 'Pause posts';
+          pauseButton.classList.toggle('danger', !paused);
+          pauseButton.classList.toggle('primary', paused);
+          pauseButton.disabled = !ownerUnlocked();
+          pauseStatus.textContent = paused ? 'Posting is paused. Only the owner can create posts.' : 'Anyone can create posts.';
+        };
+        pauseButton.onclick = async () => {
+          if (!ownerUnlocked()) { toast('Sign in to the owner account to change post publishing', true); return; }
+          const paused = !(S.postSettings && S.postSettings.paused === true);
+          try {
+            await db.ref('postSettings').update({ paused, updatedAt: TS });
+            toast(paused ? 'Posts paused' : 'Posts resumed');
+          } catch (e) { reportDbFailure('Update post publishing', e); }
+        };
+        on('change', drawPostPause);
+        detach.push(() => { handlers.change = (handlers.change || []).filter(fn => fn !== drawPostPause); });
+        drawPostPause();
+        content.append(pauseCard);
+
         const clearAll = el('button', { class: 'btn sm danger', type: 'button', onclick: async () => {
           if (!ownerUnlocked()) { toast('Sign in to the owner account before clearing posts', true); return; }
           if (!(await confirmBox('Delete every post, all post comments, and their uploaded attachments? This cannot be undone.', 'Clear all posts', true))) return;

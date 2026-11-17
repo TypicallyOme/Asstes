@@ -30,6 +30,7 @@
     "announcement": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists())" },
     "publicSettings": { ".read": true, ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'" },
     "chatSettings": { ".read": true, ".write": "auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists())" },
+    "postSettings": { ".read": true, ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'" },
     "moreCards": { ".read": true, ".write": true },
     "communities": { ".read": true, ".write": true },
     "communityMsgs": { ".read": true, ".write": true },
@@ -82,7 +83,7 @@
       ".write": "auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'",
       ".indexOn": ["ts"],
       "$id": {
-        ".write": "!data.exists() || (auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
+        ".write": "(!data.exists() && (root.child('postSettings').child('paused').val() !== true || (auth != null && auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2'))) || (data.exists() && auth != null && (auth.uid === 'zdvC4quVlRSabq57SDXoukS7SAt2' || auth.token.admin === true || root.child('adminAuthUids').child(auth.uid).exists()))",
         "reactions": { ".write": true },
         "text": { ".validate": "newData.isString() && newData.val().length <= 5000" },
         "embed": {
