@@ -76,6 +76,7 @@
       else w.append(Orbit.el('a', { href: '#', onclick: e => { e.preventDefault(); Orbit.openProfile({ setup: true }); } }, 'Create your profile'), ' to start chatting');
     };
     Orbit.on('change', render);
+    Orbit.on('presence', () => { document.getElementById('online').textContent = Orbit.onlineCount(); });
   </script>
 </body>
 </html>

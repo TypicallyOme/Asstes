@@ -3,7 +3,8 @@
   const O = window.Orbit;
   const { db, TS, el, I, uid } = O;
   const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>';
-  const SEARCH_LIMIT = 1000;
+  const SEARCH_LIMIT = 300;
+  const MAX_MESSAGES = 400;
 
   /**
    * Orbit.Conversation({
@@ -106,13 +107,18 @@
         if (query !== q) return;
         initialLoaded = true;
         checkInitialBurst(s);
-        olderWrap.classList.toggle('hidden', s.numChildren() < limit);
+        olderWrap.classList.toggle('hidden', s.numChildren() < limit || limit >= MAX_MESSAGES);
         schedule(true);
         opts.onActivity && opts.onActivity();
       });
     }
     cleanups.push(() => { if (query) query.off(); });
-    olderBtn.onclick = () => { pendingScrollTo = [...msgs.keys()][0]; limit += 200; subscribe(); };
+    olderBtn.onclick = () => {
+      if (limit >= MAX_MESSAGES) return;
+      pendingScrollTo = [...msgs.keys()][0];
+      limit = Math.min(limit + 200, MAX_MESSAGES);
+      subscribe();
+    };
 
     let scheduled = false, forceBottom = false;
     function schedule(bottom) {
@@ -136,13 +142,16 @@
           (m.replyTo ? O.userSig(m.replyTo.uid) : '') + '§' + (m.forward ? O.userSig(m.forward.uid) : '') + '§' + (/@/.test(m.text || '') ? ns + (O.me() || {}).name : '');
         const cached = nodes.get(id);
         if (cached && cached.sig === sig) out.push(cached.node);
-        else { const node = buildMsg(id, m, grouped); nodes.set(id, { node, sig }); out.push(node); }
+        else {
+          if (cached) O.disposeAttachments(cached.node);
+          const node = buildMsg(id, m, grouped); nodes.set(id, { node, sig }); out.push(node);
+        }
         prev = m;
       });
       let ref = list.firstChild;
       out.forEach(node => { if (node === ref) ref = ref.nextSibling; else list.insertBefore(node, ref); });
       while (ref) { const next = ref.nextSibling; ref.remove(); ref = next; }
-      for (const id of [...nodes.keys()]) if (!msgs.has(id)) nodes.delete(id);
+      for (const id of [...nodes.keys()]) if (!msgs.has(id)) { O.disposeAttachments(nodes.get(id).node); nodes.delete(id); }
       if (!ids.length && initialLoaded) list.append(el('div', { class: 'empty' }, opts.emptyText || 'No messages yet — say hi 👋'));
 
       if (pendingJump && nodes.get(pendingJump)) {
@@ -170,7 +179,7 @@
         const ru = O.user(m.replyTo.uid);
         body.append(el('div', { class: 'reply-ref', onclick: () => jumpTo(m.replyTo.id) },
           authorAvatar(m.replyTo.uid, 16, false, !!m.replyTo.anonymous), authorName(ru || { name: 'unknown' }, !!m.replyTo.anonymous),
-          el('span', { class: 'rt' }, (m.replyTo.text || '').replace(/:gd\d+:/g, '🙂') || '[attachment]')));
+          el('span', { class: 'rt' }, (m.replyTo.text || '').replace(/:gd\d+:/g, '🙂').replace(/:sticker_[A-Za-z0-9_.-]{1,100}:/g, '[Sticker]') || '[attachment]')));
       }
       if (!grouped) body.append(el('div', { class: 'mhead' }, authorTag(m.uid),
         el('span', { class: 'time', title: new Date(m.ts || 0).toLocaleString() }, O.clock(m.ts || 0))));
@@ -189,7 +198,7 @@
 
       const acts = el('div', { class: 'mactions' });
       const act = (icon, title, fn, cls) => acts.append(el('button', { type: 'button', title, class: cls || '', html: icon, onclick: e => { e.stopPropagation(); fn(e); } }));
-      act(I.react, 'React', e => O.openPicker(e.currentTarget, eid => O.toggleReaction(rpath, eid), { title: 'React' }));
+      act(I.react, 'React', e => O.openPicker(e.currentTarget, eid => O.toggleReaction(rpath, eid), { title: 'React', stickers: false }));
       act(I.reply, 'Reply', () => setReply(id, m));
       act(I.share, 'Forward to DM', () => forwardToDM(m));
       const own = m.uid === uid;
@@ -344,7 +353,7 @@
     }
     function markText(text, ts) {
       const words = ts.filter(t => !t.startsWith('@'));
-      const plain = String(text || '').replace(/:gd\d+:/g, '🙂');
+      const plain = String(text || '').replace(/:gd\d+:/g, '🙂').replace(/:sticker_[A-Za-z0-9_.-]{1,100}:/g, '[Sticker]');
       if (!words.length) return O.esc(plain);
       const re = new RegExp('(' + words.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')', 'gi');
       return plain.split(re).map((p, i) => i % 2 ? '<mark>' + O.esc(p) + '</mark>' : O.esc(p)).join('');
@@ -391,7 +400,7 @@
     function goToMessage(id, all) {
       if (nodes.get(id)) return jumpTo(id);
       const fromEnd = all.length - all.findIndex(([k]) => k === id);
-      limit = Math.max(limit, fromEnd + 30);
+      limit = Math.min(MAX_MESSAGES, Math.max(limit, fromEnd + 30));
       pendingJump = id;
       subscribe();
     }
@@ -449,7 +458,7 @@
       });
     }
 
-    emojiBtn.onclick = () => O.openPicker(emojiBtn, id => insertText(':gd' + id + ':'), { keepOpen: true });
+    emojiBtn.onclick = () => O.openPicker(emojiBtn, (id, kind) => insertText(O.emojiToken(id, kind)), { keepOpen: true });
     function insertText(t) {
       const s = input.selectionStart ?? input.value.length, e = input.selectionEnd ?? input.value.length;
       input.value = input.value.slice(0, s) + t + input.value.slice(e);
@@ -468,6 +477,8 @@
       if (!O.canAct()) return;
       if (chatLocked) return O.toast('Public chat is locked by a moderator', true);
       if (pending.some(p => p.status === 'uploading')) return O.toast('Wait for uploads to finish');
+      const authUid = O.authUid();
+      if (publicChat && !authUid) return O.toast('Secure chat sign-in is unavailable. Enable Anonymous sign-in in Firebase Authentication.', true);
       const text = input.value.trim().slice(0, 4000);
       const atts = pending.filter(p => p.att).map(p => p.att);
       if (!text && !atts.length) return;
@@ -481,6 +492,7 @@
       }
       lastSend = sendTime;
       const msg = { uid, text, ts: TS };
+      if (authUid) msg.authUid = authUid;
       if (atts.length) msg.attachments = atts;
       if (replyTo) msg.replyTo = replyTo;
       input.value = ''; pending = []; drawPending(); clearReply(); autosize(); updateSend(); stopTyping();
@@ -503,7 +515,7 @@
     function composerState() {
       const left = O.timeoutLeft();
       const banned = O.isBanned(), timedOut = left > 0;
-      chatLocked = publicChat && O.S.chatSettings.lockdown === true && !O.canManageChatSettings();
+      chatLocked = publicChat && O.S.chatSettings.lockdown === true && !O.isProtectedOwner();
       const blocked = timedOut || banned || chatLocked;
       timeoutNote.classList.toggle('hidden', !blocked);
       if (blocked) timeoutNote.textContent = banned ? 'You are banned.' : timedOut ? 'You are timed out — you can chat again in ' + O.fmtDur(left) + '.' : 'Public chat is temporarily locked by a moderator.';
@@ -527,8 +539,15 @@
     function stopTyping() { if (lastPing) { lastPing = 0; typingRef.remove(); } clearTimeout(typingStopTimer); }
     let typingState = {};
     const typingQ = db.ref(opts.typingPath);
-    const typingCb = typingQ.on('value', s => { typingState = s.val() || {}; drawTyping(); });
-    cleanups.push(() => { typingQ.off('value', typingCb); stopTyping(); typingRef.onDisconnect().cancel(); });
+    const typingAdded = typingQ.on('child_added', s => { typingState[s.key] = s.val(); drawTyping(); });
+    const typingChanged = typingQ.on('child_changed', s => { typingState[s.key] = s.val(); drawTyping(); });
+    const typingRemoved = typingQ.on('child_removed', s => { delete typingState[s.key]; drawTyping(); });
+    cleanups.push(() => {
+      typingQ.off('child_added', typingAdded);
+      typingQ.off('child_changed', typingChanged);
+      typingQ.off('child_removed', typingRemoved);
+      stopTyping(); typingRef.onDisconnect().cancel();
+    });
     every(drawTyping, 2000);
     function drawTyping() {
       const cutoff = O.now() - 7000;
@@ -593,7 +612,7 @@
     return {
       focus: () => input.focus(),
       openSearch,
-      destroy() { destroyed = true; cleanups.splice(0).forEach(fn => { try { fn(); } catch (e) {} }); opts.mount.innerHTML = ''; }
+      destroy() { destroyed = true; cleanups.splice(0).forEach(fn => { try { fn(); } catch (e) {} }); nodes.forEach(entry => O.disposeAttachments(entry.node)); nodes.clear(); opts.mount.innerHTML = ''; }
     };
   };
 })();

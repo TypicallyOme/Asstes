@@ -5,7 +5,9 @@
 
   O.init({ page: 'posts', require: true });
   O.$('#onlinePill').onclick = O.openMembers;
-  O.on('change', () => { O.$('#onlineCount').textContent = O.onlineCount(); });
+  const updateOnlineCount = () => { O.$('#onlineCount').textContent = O.onlineCount(); };
+  O.on('change', updateOnlineCount);
+  O.on('presence', updateOnlineCount);
 
   const ntText = O.$('#ntText'), ntPost = O.$('#ntPost'), ntAttach = O.$('#ntAttach'), ntEmoji = O.$('#ntEmoji');
   const ntTitle = O.$('#ntTitle');
@@ -65,7 +67,7 @@
   ntText.addEventListener('paste', e => { const f = [...(e.clipboardData && e.clipboardData.files || [])]; if (f.length) { e.preventDefault(); addFiles(f); } });
   ntAttach.onclick = () => { if (O.canAct()) ntFile.click(); };
   ntFile.onchange = () => { addFiles([...ntFile.files]); ntFile.value = ''; };
-  ntEmoji.onclick = () => O.openPicker(ntEmoji, id => insertAt(ntText, ':gd' + id + ':'), { keepOpen: true });
+  ntEmoji.onclick = () => O.openPicker(ntEmoji, (id, kind) => insertAt(ntText, O.emojiToken(id, kind)), { keepOpen: true });
 
   function insertAt(t, s) {
     const a = t.selectionStart ?? t.value.length, b = t.selectionEnd ?? t.value.length;
@@ -148,7 +150,27 @@
   const commentBoxes = new Map(); // id -> comments controller
   const open = new Set();
   let limit = 30, query = null, loadedOnce = false, focusAfter = null;
-  const SEARCH_LIMIT = 1000;
+  const MAX_POSTS = 120;
+  const SEARCH_LIMIT = 200;
+  const MAX_OPEN_COMMENTS = 3;
+  const COMMENT_LIMIT = 100;
+  let activeEmbedFrame = null, activeEmbedContainer = null, activeEmbedButton = null;
+  const embedIO = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (!entry.isIntersecting && activeEmbedContainer === entry.target) unloadActiveEmbed();
+    });
+  }, { rootMargin: '800px 0px' }) : null;
+  function unloadActiveEmbed() {
+    if (activeEmbedContainer && embedIO) embedIO.unobserve(activeEmbedContainer);
+    if (activeEmbedFrame) {
+      activeEmbedFrame.removeAttribute('srcdoc');
+      activeEmbedFrame.src = 'about:blank';
+      activeEmbedFrame.remove();
+    }
+    if (activeEmbedButton && activeEmbedButton.isConnected) activeEmbedButton.textContent = 'Load embedded content';
+    activeEmbedFrame = activeEmbedContainer = activeEmbedButton = null;
+  }
+  window.addEventListener('pagehide', unloadActiveEmbed);
   let searchQ = '', subLimit = 0;
 
   function subscribe() {
@@ -162,12 +184,12 @@
     query.on('child_removed', s => { posts.delete(s.key); schedule(); });
     query.once('value', s => {
       loadedOnce = true;
-      O.$('#moreWrap').classList.toggle('hidden', !!searchQ || s.numChildren() < eff);
+      O.$('#moreWrap').classList.toggle('hidden', !!searchQ || s.numChildren() < eff || limit >= MAX_POSTS);
       schedule();
       handleHash();
     });
   }
-  O.$('#moreBtn').onclick = () => { limit += 30; subscribe(); };
+  O.$('#moreBtn').onclick = () => { if (limit < MAX_POSTS) { limit = Math.min(limit + 30, MAX_POSTS); subscribe(); } };
 
   let scheduled = false;
   function schedule() {
@@ -179,6 +201,7 @@
   function render() {
     let ids = [...posts.keys()].sort((a, b) => (posts.get(b).ts || 0) - (posts.get(a).ts || 0));
     if (searchQ) ids = ids.filter(id => matches(posts.get(id), searchQ));
+    const visibleIds = new Set(ids);
     drawSearchMeta(ids.length);
     const ns = Object.keys(O.S.byName).join(',') + '§' + searchQ;
     const out = ids.map(id => {
@@ -186,6 +209,10 @@
       const sig = JSON.stringify(p) + '§' + O.userSig(p.uid) + '§' + O.canModerate(p.uid) + '§' + (/@/.test(p.text || '') ? ns : '');
       const c = nodes.get(id);
       if (c && c.sig === sig) return c.node;
+      if (c) {
+        O.disposeAttachments(c.node);
+        if (activeEmbedFrame && c.node.contains(activeEmbedFrame)) unloadActiveEmbed();
+      }
       const node = buildPost(id, p);
       nodes.set(id, { node, sig });
       return node;
@@ -193,7 +220,9 @@
     let ref = feed.firstChild;
     out.forEach(n => { if (n === ref) ref = ref.nextSibling; else feed.insertBefore(n, ref); });
     while (ref) { const nx = ref.nextSibling; ref.remove(); ref = nx; }
-    for (const id of [...nodes.keys()]) if (!posts.has(id)) {
+    for (const id of [...nodes.keys()]) if (!visibleIds.has(id)) {
+      O.disposeAttachments(nodes.get(id).node);
+      if (activeEmbedFrame && nodes.get(id).node.contains(activeEmbedFrame)) unloadActiveEmbed();
       nodes.delete(id);
       const cb = commentBoxes.get(id); if (cb) { cb.destroy(); commentBoxes.delete(id); }
     }
@@ -226,7 +255,7 @@
     const r = O.reactionsEl(p.reactions, 'posts/' + id + '/reactions'); if (r) main.append(r);
 
     const reactBtn = el('button', { type: 'button', title: 'React', html: I.react });
-    reactBtn.onclick = () => O.openPicker(reactBtn, eid => O.toggleReaction('posts/' + id + '/reactions', eid), { title: 'React' });
+    reactBtn.onclick = () => O.openPicker(reactBtn, eid => O.toggleReaction('posts/' + id + '/reactions', eid), { title: 'React', stickers: false });
     const cCount = p.commentCount || 0;
     const commentBtn = el('button', { type: 'button', title: 'Comments', html: I.comment + (cCount ? '<span>' + cCount + '</span>' : '') });
     commentBtn.onclick = () => toggleComments(id);
@@ -241,18 +270,31 @@
 
   function postEmbed(embed) {
     if (!embed || typeof embed !== 'object') return null;
-    const frame = el('iframe', { title: 'Embedded post content', loading: 'lazy', allow: 'fullscreen; autoplay; encrypted-media', allowfullscreen: true, referrerpolicy: 'no-referrer' });
+    let frameUrl = '', frameHtml = null;
     if (embed.type === 'url' && typeof embed.url === 'string') {
       try {
         const url = new URL(embed.url, location.href);
         if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
-        frame.src = url.href;
+        frameUrl = url.href;
       } catch (e) { return null; }
     } else if (embed.type === 'html' && typeof embed.html === 'string' && embed.html.length <= 20000) {
-      frame.setAttribute('sandbox', 'allow-scripts allow-forms');
-      frame.srcdoc = embed.html;
+      frameHtml = embed.html;
     } else return null;
-    return el('div', { class: 'post-embed' }, frame);
+    const box = el('div', { class: 'post-embed' });
+    const button = el('button', { type: 'button', class: 'post-embed-load' }, 'Load embedded content');
+    button.onclick = () => {
+      if (activeEmbedFrame && activeEmbedContainer === box) { unloadActiveEmbed(); return; }
+      unloadActiveEmbed();
+      const frame = el('iframe', { title: 'Embedded post content', loading: 'lazy', allow: 'fullscreen; autoplay; encrypted-media', allowfullscreen: true, referrerpolicy: 'no-referrer' });
+      if (frameHtml !== null) { frame.setAttribute('sandbox', 'allow-scripts allow-forms'); frame.srcdoc = frameHtml; }
+      else frame.src = frameUrl;
+      activeEmbedFrame = frame; activeEmbedContainer = box; activeEmbedButton = button;
+      button.textContent = 'Unload embedded content';
+      box.insertBefore(frame, button);
+      if (embedIO) embedIO.observe(box);
+    };
+    box.appendChild(button);
+    return box;
   }
 
   const searchIn = O.$('#search'), searchClear = O.$('#searchClear'), searchMeta = O.$('#searchMeta');
@@ -385,12 +427,15 @@
 
     go.onclick = async () => {
       if (!O.canAct()) return;
+      const authUid = O.authUid();
+      if (dest.type === 'main' && !authUid) return O.toast('Secure chat sign-in is unavailable. Enable Anonymous sign-in in Firebase Authentication.', true);
       go.disabled = true;
       const atts = p.attachments ? (Array.isArray(p.attachments) ? p.attachments : Object.values(p.attachments)) : [];
       const share = { id, uid: p.uid, text: (p.text || '').slice(0, 300) };
       if (p.title) share.title = p.title.slice(0, 100);
       if (atts[0]) share.media = atts[0].kind;
       const msg = { uid, text: note.value.trim().slice(0, 1000), ts: TS, share };
+      if (authUid) msg.authUid = authUid;
       try {
         let where = 'chat';
         if (dest.type === 'main') await db.ref('messages').push(msg);
@@ -406,7 +451,24 @@
   }
 
   function toggleComments(id) {
-    if (open.has(id)) open.delete(id); else open.add(id);
+    if (open.has(id)) {
+      open.delete(id);
+      const current = commentBoxes.get(id);
+      if (current) { current.destroy(); commentBoxes.delete(id); }
+    } else {
+      open.add(id);
+      let closedOldest = false;
+      while (open.size > MAX_OPEN_COMMENTS) {
+        const oldest = open.values().next().value;
+        open.delete(oldest);
+        closedOldest = true;
+        const oldComments = commentBoxes.get(oldest);
+        if (oldComments) { oldComments.destroy(); commentBoxes.delete(oldest); }
+        const oldNode = nodes.get(oldest);
+        if (oldNode) oldNode.sig = '';
+      }
+      if (closedOldest) O.toast('Only 3 reply panels can stay open at once.');
+    }
     const n = nodes.get(id);
     if (n) n.sig = ''; // force rebuild
     schedule();
@@ -420,7 +482,7 @@
     const emo = el('button', { class: 'icon-btn', type: 'button', title: 'Emojis', html: I.smile });
     const send = el('button', { class: 'icon-btn', type: 'button', title: 'Reply', html: I.send });
     box.append(listEl, el('div', { class: 'c-compose' }, input, emo, send));
-    emo.onclick = () => O.openPicker(emo, id => { input.value += ':gd' + id + ':'; input.focus(); }, { keepOpen: true });
+    emo.onclick = () => O.openPicker(emo, (id, kind) => { input.value += O.emojiToken(id, kind); input.focus(); }, { keepOpen: true });
     input.addEventListener('focus', () => { if (!O.me()) O.openProfile({ setup: true }); });
     let last = 0;
     const submit = async () => {
@@ -446,7 +508,7 @@
         const c = data[cid];
         const tools = el('div', { class: 'c-tools' });
         const rb = el('button', { type: 'button', title: 'React', html: I.react });
-        rb.onclick = () => O.openPicker(rb, eid => O.toggleReaction('comments/' + postId + '/' + cid + '/reactions', eid), { title: 'React' });
+        rb.onclick = () => O.openPicker(rb, eid => O.toggleReaction('comments/' + postId + '/' + cid + '/reactions', eid), { title: 'React', stickers: false });
         tools.append(rb);
         tools.append(el('button', { type: 'button', title: 'Mention', html: I.reply, onclick: () => { const u = O.user(c.uid); if (u) { input.value = '@' + u.name + ' ' + input.value; input.focus(); } } }));
         if (c.uid === uid || O.canModerate(c.uid)) tools.append(el('button', { type: 'button', title: 'Delete', html: I.trash, onclick: () => O.mod.deleteComment(postId, cid, c) }));
@@ -457,14 +519,14 @@
             O.richEl(c.text), r)));
       });
     };
-    const ref = db.ref('comments/' + postId).limitToLast(200);
+    const ref = db.ref('comments/' + postId).limitToLast(COMMENT_LIMIT);
     const cb = ref.on('value', s => { data = s.val() || {}; draw(); });
     const offChange = () => draw();
     O.on('change', offChange);
     const ctrl = {
       el: box,
       focus: () => input.focus(),
-      destroy: () => { ref.off('value', cb); }
+      destroy: () => { ref.off('value', cb); O.off('change', offChange); data = {}; listEl.replaceChildren(); }
     };
     commentBoxes.set(postId, ctrl);
     return ctrl;

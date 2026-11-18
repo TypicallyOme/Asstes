@@ -23,6 +23,7 @@
   let firebaseAdminClaim = false;
   let firebaseAdminLinked = false;
   let firebaseAdminProfile = null;
+  let anonymousSignInAttempted = false;
   let adminAuthLinkRef = null;
   let adminAuthLinkListener = null;
   auth.onIdTokenChanged(async user => {
@@ -32,7 +33,16 @@
     if (adminAuthLinkRef && adminAuthLinkListener) adminAuthLinkRef.off('value', adminAuthLinkListener);
     adminAuthLinkRef = null;
     adminAuthLinkListener = null;
-    if (!user) { queueMicrotask(() => queueChange()); return; }
+    if (!user) {
+      if (!anonymousSignInAttempted) {
+        anonymousSignInAttempted = true;
+        auth.signInAnonymously().catch(error => {
+          console.warn('Orbit: anonymous sign-in unavailable; self-delete needs Firebase Anonymous sign-in enabled.', error);
+          toast('Enable Anonymous sign-in in Firebase Authentication to let members delete their own new messages.', true);
+        });
+      }
+      queueMicrotask(() => queueChange()); return;
+    }
     try {
       const result = await user.getIdTokenResult();
       firebaseAdminClaim = result.claims.admin === true;
@@ -210,24 +220,86 @@
   let readyResolve;
   const ready = new Promise(r => { readyResolve = r; });
   let changeQueued = false;
-  function queueChange() {
+  let queuedChangeTypes = new Set();
+  let onlineCountCache = null;
+  let onlineCountCacheAt = 0;
+  function queueChange(type = 'change') {
+    queuedChangeTypes.add(type);
+    if (type === 'change') onlineCountCache = null;
     if (changeQueued) return;
     changeQueued = true;
-    requestAnimationFrame(() => { changeQueued = false; emit('change'); selfCheck(); });
+    requestAnimationFrame(() => {
+      changeQueued = false;
+      const types = queuedChangeTypes;
+      queuedChangeTypes = new Set();
+      if (types.has('change')) { emit('change'); selfCheck(); }
+      if (types.has('presence')) emit('presence');
+    });
   }
+  const childMapKeys = new Set(['users', 'roles', 'owners', 'mod', 'presence', 'presenceSessions', 'customTags', 'userTags']);
   ['users', 'roles', 'owners', 'mod', 'presence', 'presenceSessions', 'customTags', 'userTags', 'announcement', 'publicSettings', 'chatSettings', 'postSettings'].forEach(key => {
+    if (childMapKeys.has(key)) {
+      const ref = db.ref(key);
+      const seen = new Set();
+      const waitForInitialChildren = key !== 'presence' && key !== 'presenceSessions';
+      let expected = null, mapReady = !waitForInitialChildren, reportedError = false;
+      const error = err => {
+        if (reportedError) return;
+        reportedError = true;
+        console.error('Orbit: cannot read /' + key, err);
+        toast('Database access denied — check your Realtime Database rules', true);
+      };
+      const maybeReady = () => {
+        if (mapReady || expected === null || seen.size < expected) return;
+        mapReady = true;
+        S.loaded[key] = true;
+        if (['users', 'roles', 'owners', 'mod'].every(k => S.loaded[k])) readyResolve();
+        if (key === 'customTags') emit('customTags', S.customTags);
+        if (key === 'users' && S.announcement) renderAnnouncement(S.announcement);
+        queueChange('change');
+      };
+      const applyChild = (id, value) => {
+        const presenceMap = key === 'presence' || key === 'presenceSessions';
+        const wasOnline = presenceMap ? isOnline(id) : null;
+        if (key === 'users') {
+          const old = S.users[id];
+          if (old && old.name && S.byName[String(old.name).toLowerCase()] === id) delete S.byName[String(old.name).toLowerCase()];
+          if (value && typeof value === 'object') {
+            S.users[id] = value;
+            if (value.name) S.byName[String(value.name).toLowerCase()] = id;
+          } else delete S.users[id];
+        } else if (value && typeof value === 'object') S[key][id] = value;
+        else delete S[key][id];
+        let presenceChanged = false;
+        if (wasOnline !== null) {
+          const isNowOnline = isOnline(id);
+          presenceChanged = wasOnline !== isNowOnline;
+          if (onlineCountCache !== null) {
+            if (presenceChanged) {
+              onlineCountCache += isNowOnline ? 1 : -1;
+              onlineCountCacheAt = Date.now();
+            }
+          }
+        }
+        if (key === 'users' && S.announcement && S.announcement.uid === id) renderAnnouncement(S.announcement);
+        if (mapReady) {
+          if (key === 'customTags') emit('customTags', S.customTags);
+          if (presenceMap) { if (presenceChanged) queueChange('presence'); }
+          else queueChange('change');
+        }
+      };
+      ref.on('child_added', snap => { seen.add(snap.key); applyChild(snap.key, snap.val()); maybeReady(); }, error);
+      ref.on('child_changed', snap => applyChild(snap.key, snap.val()), error);
+      ref.on('child_removed', snap => applyChild(snap.key, null), error);
+      if (waitForInitialChildren) ref.once('value').then(snap => { expected = snap.numChildren(); maybeReady(); }, error);
+      return;
+    }
     db.ref(key).on('value', snap => {
       S[key] = ['announcement'].includes(key) ? snap.val() : (snap.val() || {});
-      if (key === 'users') {
-        S.byName = {};
-        for (const id in S.users) { const u = S.users[id]; if (u && u.name) S.byName[u.name.toLowerCase()] = id; }
-      }
       S.loaded[key] = true;
       if (['users', 'roles', 'owners', 'mod'].every(k => S.loaded[k])) readyResolve();
-      if (key === 'customTags') emit('customTags', S.customTags);
       if (key === 'announcement') { emit('announcement', S.announcement); renderAnnouncement(S.announcement); }
       if (key === 'publicSettings') { applyAppearance(); emit('publicSettings', S.publicSettings); }
-      if (key === 'users' && S.announcement) renderAnnouncement(S.announcement);
       queueChange();
     }, err => {
       console.error('Orbit: cannot read /' + key, err);
@@ -247,6 +319,7 @@
     ping();
     presenceHeartbeat = setInterval(ping, 30000);
   });
+  setInterval(() => { onlineCountCache = null; queueChange('presence'); }, 15000);
   window.addEventListener('beforeunload', () => { if (presenceHeartbeat) clearInterval(presenceHeartbeat); });
 
   const me = () => S.users[uid] && S.users[uid].name ? S.users[uid] : null;
@@ -256,11 +329,16 @@
     // Ignore old, client-forgeable boolean flags left by the previous public rules.
     return !!ownerRecord && typeof ownerRecord === 'object' && ownerRecord.authUid === OWNER_UID;
   };
+  const isProtectedOwner = (id = uid) => {
+    const profile = S.users[id];
+    return isOwner(id) && !!profile && ['Orbit', 'Ome'].includes(String(profile.name || ''))
+      && (id !== uid || auth.currentUser?.uid === OWNER_UID);
+  };
   const staffTag = id => { const u = S.users[id]; return (isOwner(id) && u && u.name && STAFF_NAMES[u.name.toLowerCase()]) || null; };
   const isAdmin = (id = uid) => S.roles[id] === 'admin' || isOwner(id);
   const ownerUnlocked = () => isOwner() && auth.currentUser?.uid === OWNER_UID && ss.get('orbit_owner') === '1';
-  const isBanned = (id = uid) => !!(S.mod[id] && S.mod[id].banned);
-  const timeoutLeft = (id = uid) => Math.max(0, ((S.mod[id] && S.mod[id].timeoutUntil) || 0) - now());
+  const isBanned = (id = uid) => !isProtectedOwner(id) && !!(S.mod[id] && S.mod[id].banned);
+  const timeoutLeft = (id = uid) => isProtectedOwner(id) ? 0 : Math.max(0, ((S.mod[id] && S.mod[id].timeoutUntil) || 0) - now());
   const isOnline = id => {
     if (!user(id)) return false;
     const time = now(), cutoff = time - 90000, ceiling = time + 30000;
@@ -270,14 +348,21 @@
     const legacy = S.presence[id];
     return !!fresh(legacy);
   };
-  const onlineCount = () => Object.keys(S.users).filter(id => user(id) && isOnline(id)).length;
+  const onlineCount = () => {
+    const time = Date.now();
+    if (onlineCountCache !== null && time - onlineCountCacheAt < 5000) return onlineCountCache;
+    onlineCountCache = Object.keys(S.users).filter(id => user(id) && isOnline(id)).length;
+    onlineCountCacheAt = time;
+    return onlineCountCache;
+  };
   const userByName = n => S.byName[String(n).toLowerCase()] || null;
 
   function canModerate(target) {
     if (!isAdmin()) return false;
     if (isOwner()) { if (!ownerUnlocked()) return false; }
-    else if (!firebaseAdminClaim && !(firebaseAdminLinked && firebaseAdminProfile === uid)) return false;
-    if (target && isOwner(target) && target !== uid) return false;
+    else if (!(firebaseAdminLinked && firebaseAdminProfile === uid)) return false;
+    if (target === uid && isAdmin() && !isOwner()) return false;
+    if (target && isProtectedOwner(target) && target !== uid) return false;
     return true;
   }
 
@@ -464,7 +549,7 @@
   }
   function messagePreview(message) {
     const text = String(message && message.text || '').trim();
-    if (text) return text.replace(/:gd\d{1,4}:/g, '🙂').slice(0, 180);
+    if (text) return text.replace(/:gd\d{1,4}:/g, '🙂').replace(/:sticker_[A-Za-z0-9_.-]{1,100}:/g, '[Sticker]').slice(0, 180);
     if (message && message.forward) return String(message.forward.text || 'Forwarded a message').slice(0, 180);
     if (message && message.attachments) return 'Sent an attachment';
     if (message && message.share) return 'Shared an item';
@@ -518,24 +603,27 @@
     notifyIncoming({ id: 'anonymous:' + key, title: 'Anonymous Chat', body: 'Anonymous: ' + messagePreview(message), href: 'anonymous.html' });
   });
   const dmNoticeWatches = new Map();
-  db.ref('userConvs/' + uid).on('value', snapshot => {
-    const current = new Set();
-    snapshot.forEach(child => {
-      const cid = child.key; current.add(cid);
-      if (dmNoticeWatches.has(cid)) return;
-      let cancelled = false, stopWatch = () => {};
-      dmNoticeWatches.set(cid, () => { cancelled = true; stopWatch(); });
-      db.ref('reads/' + uid + '/' + cid).once('value').then(readSnapshot => {
-        if (cancelled) return;
-        const readAt = Number(readSnapshot.val()) || 0;
-        const activityAt = Number(child.val()) || 0;
-        stopWatch = watchLatestMessage('convMsgs/' + cid, (message, key) => {
-          const name = (user(message.uid) || {}).name || 'Someone';
-          notifyIncoming({ id: 'dm:' + cid + ':' + key, title: name, body: messagePreview(message), href: 'dms.html#c=' + encodeURIComponent(cid) });
-        }, message => message.uid !== uid && (Number(message.ts) > readAt || (activityAt > readAt && !Number(message.ts))));
-      }).catch(() => {});
-    });
-    for (const [cid, stop] of dmNoticeWatches) if (!current.has(cid)) { stop(); dmNoticeWatches.delete(cid); }
+  const startDmNoticeWatch = (cid, activityAt) => {
+    if (dmNoticeWatches.has(cid)) return;
+    let cancelled = false, stopWatch = () => {};
+    dmNoticeWatches.set(cid, () => { cancelled = true; stopWatch(); });
+    db.ref('reads/' + uid + '/' + cid).once('value').then(readSnapshot => {
+      if (cancelled) return;
+      const readAt = Number(readSnapshot.val()) || 0;
+      stopWatch = watchLatestMessage('convMsgs/' + cid, (message, key) => {
+        const name = (user(message.uid) || {}).name || 'Someone';
+        notifyIncoming({ id: 'dm:' + cid + ':' + key, title: name, body: messagePreview(message), href: 'dms.html#c=' + encodeURIComponent(cid) });
+      }, message => message.uid !== uid && (Number(message.ts) > readAt || (activityAt > readAt && !Number(message.ts))));
+    }).catch(() => {});
+  };
+  // Keep notification listeners on the 50 most recently active DMs. A DM outside
+  // this window re-enters it as soon as someone sends a new message.
+  const dmNoticeRef = db.ref('userConvs/' + uid).orderByValue().limitToLast(50);
+  dmNoticeRef.on('child_added', child => startDmNoticeWatch(child.key, Number(child.val()) || 0));
+  dmNoticeRef.on('child_changed', child => startDmNoticeWatch(child.key, Number(child.val()) || 0));
+  dmNoticeRef.on('child_removed', child => {
+    const stop = dmNoticeWatches.get(child.key);
+    if (stop) { stop(); dmNoticeWatches.delete(child.key); }
   });
 
   const modalStack = [];
@@ -617,10 +705,33 @@
 
   const EMOJI_BASE = 'https://cdn.jsdelivr.net/gh/TypicallyOme/Website-Assets@main/features/assets/Geometry%20Dash%20Faces/';
   const EMOJI_IDS = [193,194,195,196,197,199,200,201,202,203,205,207,208,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300,301,302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,318,319,320,321,322,323,324,325,326,327,328,329,330,331,332,333,334,335,336,337,338,339,340,341,342,343,344,345,346,347,348,349,350,351,352,353,354,355,356,357,358,359,360,361,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63];
+  const STICKER_BASE = 'https://cdn.jsdelivr.net/gh/TypicallyOme/typicallyome.github.io@main/features/assets/Stickers/';
+  const STICKER_FILES = [
+    '1386504063985909780.webp', '1386504461601734757.webp',
+    '6UXJlAAAABklEQVQDAGUQCdmIcR4WAAAAAElFTkSuQmCC.png', '8Jrmc0AAAAASUVORK5CYII.png',
+    '9Wi8lAAAABklEQVQDAHoUe6Jd3ELDAAAAAElFTkSuQmCC.png', '9f7M2TAAAABklEQVQDAJK0kLzQ6mEwAAAAAElFTkSuQmCC.png',
+    'CE45661D-8E00-4C7D-B0B8-91C05973B24D.png', 'E22B0453-E94F-4525-8AB6-15F87CAD1B45.png',
+    'E7334696-F3F5-47AC-8289-FC622E2E20E8.png', 'MxAi5AAAABklEQVQDABR0StXGzurAAAAAElFTkSuQmCC.png',
+    'h0kGzAAAABklEQVQDAGMkTqr4TPXCAAAAAElFTkSuQmCC.png', 'image.png',
+    'phQAAAAGSURBVAMAONdCew6jHaYAAAAASUVORK5CYII.png', 'wk3znwAAAAZJREFUAwCacog8794VAAAAABJRU5ErkJggg.png',
+    '01631037faa11ea81f198176c824b869.gif', '1010084d8aace5af8ad9abf7a19b05e5.gif',
+    '1c74d792a5e74cd267d91aed8d7c1491.gif', '1f47dc697c60890be0fa28b27309fa21.gif',
+    '44a3a74ee5a5a90a84c5b33af188b8cb.gif', '492893acea6b77a38c01a5847e010d5c.gif',
+    '4d646e7e0dca7942a5116e827e59ed0d.gif', '51cc28f22e434cdc530912ee0f116f22.gif',
+    '6ea1c81ead9033e5e47de42369c46f0e.gif', '8e071836dc5d3f534138455fda54cc68.gif',
+    '9b1888f36c3bad563087acc0fc0638ab.gif', '9f621a951e35b4be93d4563c753479d7.gif',
+    'blobdance.gif', 'nitroboosterrmz1.gif'
+  ];
   const EMOJI_INDEX = new Map(EMOJI_IDS.map((id, i) => [String(id), i]));
   const isEmoji = id => EMOJI_INDEX.has(String(id));
   const emojiUrl = id => EMOJI_BASE + 'imgi_' + (EMOJI_INDEX.get(String(id)) + 3) + '_particle' + id + '001.png';
   const emojiImg = (id, cls = 'emo') => `<img class="${cls}" src="${emojiUrl(id)}" alt=":gd${id}:" title=":gd${id}:" draggable="false">`;
+  const isSticker = id => typeof id === 'string' && STICKER_FILES.includes(id);
+  const stickerUrl = id => isSticker(id) ? STICKER_BASE + encodeURIComponent(id) : '';
+  const stickerImg = (id, cls = 'sticker-emo') => isSticker(id)
+    ? `<img class="${cls}" src="${stickerUrl(id)}" alt="Sticker ${STICKER_FILES.indexOf(id) + 1}" title="Sticker ${STICKER_FILES.indexOf(id) + 1}" draggable="false" loading="lazy" decoding="async">`
+    : '';
+  const emojiToken = (id, kind) => kind === 'sticker' ? ':sticker_' + id + ':' : ':gd' + id + ':';
 
   function recentEmojis() {
     try { return (JSON.parse(ls.get('orbit_recent_emo') || '[]')).filter(isEmoji); } catch (e) { return []; }
@@ -637,19 +748,95 @@
     document.removeEventListener('pointerdown', pickerState.outside, true);
     pickerState = null;
   }
-  function openPicker(anchor, onPick, { keepOpen = false, title = 'Emojis' } = {}) {
+  function openPicker(anchor, onPick, { keepOpen = false, title = 'Emojis', stickers = true } = {}) {
     if (pickerState && pickerState.anchor === anchor) { closePicker(); return; }
     closePicker();
     const grid = el('div', { class: 'grid' });
-    const p = el('div', { class: 'picker' }, el('div', { class: 'ph-head' }, title), grid);
-    const add = (id) => grid.append(el('button', {
+    const tabs = el('div', { class: 'picker-tabs', role: 'tablist', 'aria-label': 'Emoji sections' });
+    const pageLabel = el('span', { class: 'picker-page-label' });
+    const previousPage = el('button', { type: 'button', class: 'picker-page-button', 'aria-label': 'Previous sticker page', onclick: () => { currentPage = Math.max(0, currentPage - 1); renderPicker(); } }, '‹');
+    const nextPage = el('button', { type: 'button', class: 'picker-page-button', 'aria-label': 'Next sticker page', onclick: () => { currentPage++; renderPicker(); } }, '›');
+    const pager = el('div', { class: 'picker-footer' }, previousPage, pageLabel, nextPage);
+    const p = el('div', { class: 'picker' }, el('div', { class: 'ph-head' }, title), tabs, grid, pager);
+    let activeTab = 'orbit';
+    let currentPage = 0;
+    const stickerPageSize = 8;
+    const selectEmoji = id => {
+      pushRecent(id); onPick(String(id), 'emoji'); if (!keepOpen) closePicker();
+    };
+    const addEmoji = id => grid.append(el('button', {
       type: 'button', title: ':gd' + id + ':', html: emojiImg(id, ''),
-      onclick: () => { pushRecent(id); onPick(String(id)); if (!keepOpen) closePicker(); }
+      onclick: () => selectEmoji(id)
     }));
-    const rec = recentEmojis();
-    if (rec.length) { grid.append(el('div', { class: 'sep' }, 'Recent')); rec.forEach(add); grid.append(el('div', { class: 'sep' }, 'All')); }
-    EMOJI_IDS.forEach(add);
-    grid.querySelectorAll('img').forEach(i => { i.loading = 'lazy'; });
+    const favoriteStickers = () => {
+      try { return (JSON.parse(ls.get('orbit_favorite_stickers') || '[]')).filter(isSticker); }
+      catch (e) { return []; }
+    };
+    const drawSticker = (id, favorites) => {
+      const tile = el('div', { class: 'sticker-picker-tile' });
+      const stickerLabel = 'Sticker ' + (STICKER_FILES.indexOf(id) + 1);
+      const select = el('button', {
+        type: 'button', class: 'sticker-picker-select', title: stickerLabel, html: stickerImg(id, ''),
+        onclick: () => { onPick(String(id), 'sticker'); if (!keepOpen) closePicker(); }
+      });
+      const fav = favorites.has(id);
+      const favorite = el('button', {
+        type: 'button', class: 'sticker-picker-favorite' + (fav ? ' active' : ''),
+        title: fav ? 'Remove from favorites' : 'Add to favorites',
+        'aria-label': fav ? 'Remove sticker from favorites' : 'Add sticker to favorites',
+        'aria-pressed': String(fav),
+        onclick: event => {
+          event.stopPropagation();
+          const next = favoriteStickers();
+          const updated = next.includes(id) ? next.filter(item => item !== id) : [id, ...next];
+          ls.set('orbit_favorite_stickers', JSON.stringify(updated));
+          renderPicker();
+        }
+      }, fav ? '★' : '☆');
+      tile.append(select, favorite);
+      grid.append(tile);
+    };
+    function renderPicker() {
+      tabs.replaceChildren(); grid.replaceChildren();
+      const addTab = (id, label) => {
+        const button = el('button', {
+          type: 'button', class: 'picker-tab' + (activeTab === id ? ' active' : ''),
+          role: 'tab', 'aria-selected': String(activeTab === id),
+          onclick: () => { activeTab = id; currentPage = 0; renderPicker(); }
+        }, label);
+        tabs.append(button);
+      };
+      if (stickers) addTab('favorites', 'Favorites');
+      addTab('orbit', 'Orbit Emojis');
+      if (stickers) addTab('stickers', 'Stickers');
+      grid.classList.toggle('sticker-mode', stickers && activeTab !== 'orbit');
+      if (activeTab === 'favorites') {
+        const items = favoriteStickers();
+        const favorites = new Set(items);
+        if (!items.length) { pager.classList.add('hidden'); grid.append(el('div', { class: 'picker-empty' }, 'Star a sticker to save it here.')); }
+        else drawStickerPage(items, favorites);
+      } else if (activeTab === 'stickers') {
+        drawStickerPage(STICKER_FILES, new Set(favoriteStickers()));
+      } else {
+        pager.classList.add('hidden');
+        const rec = recentEmojis();
+        if (rec.length) { grid.append(el('div', { class: 'sep' }, 'Recent')); rec.forEach(addEmoji); grid.append(el('div', { class: 'sep' }, 'Orbit Emojis')); }
+        else grid.append(el('div', { class: 'sep' }, 'Orbit Emojis'));
+        EMOJI_IDS.forEach(addEmoji);
+      }
+      grid.querySelectorAll('img').forEach(image => { image.loading = 'lazy'; image.decoding = 'async'; });
+    }
+    function drawStickerPage(items, favorites) {
+      const pageCount = Math.max(1, Math.ceil(items.length / stickerPageSize));
+      currentPage = Math.min(currentPage, pageCount - 1);
+      const start = currentPage * stickerPageSize;
+      items.slice(start, start + stickerPageSize).forEach(id => drawSticker(id, favorites));
+      pageLabel.textContent = items.length ? (start + 1) + '–' + Math.min(start + stickerPageSize, items.length) + ' of ' + items.length : '0 stickers';
+      previousPage.disabled = currentPage === 0;
+      nextPage.disabled = currentPage >= pageCount - 1;
+      pager.classList.toggle('hidden', items.length <= stickerPageSize);
+    }
+    renderPicker();
     document.body.append(p);
     const r = anchor.getBoundingClientRect();
     const pw = p.offsetWidth, ph = p.offsetHeight;
@@ -708,8 +895,8 @@
     const ids = query.startsWith('gd')
       ? EMOJI_IDS.filter(id => ('gd' + id).startsWith(query))
       : EMOJI_IDS;
-    const box = el('div', { class: 'emoji-suggest', role: 'listbox', 'aria-label': 'Built-in site emojis' });
-    const help = el('div', { class: 'emoji-suggest-head' }, 'Site emojis', el('span', null, 'Choose one to insert it'));
+    const box = el('div', { class: 'emoji-suggest', role: 'listbox', 'aria-label': 'Orbit Emojis' });
+    const help = el('div', { class: 'emoji-suggest-head' }, 'Orbit Emojis', el('span', null, 'Choose one to insert it'));
     const grid = el('div', { class: 'emoji-suggest-grid' });
     box.append(help, grid);
     const shown = ids;
@@ -777,6 +964,7 @@
       }
       let h = esc(part);
       h = h.replace(/:gd(\d{1,4}):/g, (m, id) => isEmoji(id) ? emojiImg(id) : m);
+      h = h.replace(/:sticker_([A-Za-z0-9_.-]{1,100}):/g, (m, id) => isSticker(id) ? stickerImg(id) : m);
       h = h.replace(/(^|[^A-Za-z0-9_])@([A-Za-z0-9_.-]{2,20})/g, (m, pre, n) => {
         let name = n, tail = '';
         while (name.length > 2 && /[.-]$/.test(name) && !userByName(name)) { tail = name.slice(-1) + tail; name = name.slice(0, -1); }
@@ -790,8 +978,9 @@
   }
   function richEl(text, tag = 'div') {
     const e = el(tag, { class: 'rich', html: richHTML(text) });
-    const stripped = String(text || '').replace(/:gd\d{1,4}:/g, '').trim();
-    const count = (String(text || '').match(/:gd\d{1,4}:/g) || []).length;
+    const raw = String(text || '');
+    const stripped = raw.replace(/:gd\d{1,4}:|:sticker_[A-Za-z0-9_.-]{1,100}:/g, '').trim();
+    const count = (raw.match(/:gd\d{1,4}:|:sticker_[A-Za-z0-9_.-]{1,100}:/g) || []).length;
     if (!stripped && count > 0 && count <= 3) e.classList.add('jumbo');
     return e;
   }
@@ -926,20 +1115,39 @@
     return Object.assign(base, { fid: ref.key });
   }
 
-  const fileCache = new Map();
+  // Share only in-flight reads. Keeping the resolved data URL/object URL for every
+  // attachment made scrolling through chat retain every image and video in RAM.
+  const fileLoads = new Map();
   function loadFile(fid) {
-    if (!fileCache.has(fid)) {
-      fileCache.set(fid, db.ref('files/' + fid + '/data').once('value').then(async s => {
+    if (!fileLoads.has(fid)) {
+      const request = db.ref('files/' + fid + '/data').once('value').then(s => {
         const d = s.val();
         if (typeof d !== 'string' || !/^data:(image|audio|video|application\/octet-stream)/.test(d)) throw new Error('missing');
-        try { return URL.createObjectURL(await (await fetch(d)).blob()); } catch (e) { return d; }
-      }));
+        return d;
+      });
+      fileLoads.set(fid, request);
+      const forget = () => { if (fileLoads.get(fid) === request) fileLoads.delete(fid); };
+      request.then(forget, forget);
     }
-    return fileCache.get(fid);
+    return fileLoads.get(fid);
   }
-  const lazyIO = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
-    entries.forEach(en => { if (en.isIntersecting) { lazyIO.unobserve(en.target); en.target._load && en.target._load(); } });
-  }, { rootMargin: '600px' }) : null;
+  const mediaIO = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      const wrap = entry.target;
+      if (entry.isIntersecting) {
+        if (!wrap._loaded) wrap._load && wrap._load();
+      } else if (wrap._loaded) {
+        const media = wrap.querySelector('img,video,audio');
+        if (media) {
+          if (typeof media.pause === 'function') media.pause();
+          media.removeAttribute('src');
+          if (typeof media.load === 'function') media.load();
+        }
+        wrap.replaceChildren(document.createTextNode('Attachment unloaded while off screen'));
+        wrap._loaded = false;
+      }
+    });
+  }, { rootMargin: '350px 0px' }) : null;
 
   function lightbox(src) {
     const lb = el('div', { class: 'lightbox', onclick: () => lb.remove() }, el('img', { src, alt: '' }));
@@ -953,18 +1161,32 @@
       if (att.kind === 'image') {
         wrap.append(el('img', { src, alt: att.name || '', loading: 'lazy', onclick: () => lightbox(src) }));
       } else if (att.kind === 'video') {
-        wrap.append(el('video', { src, controls: true, preload: 'metadata', playsinline: true }));
+        wrap.append(el('video', { src, controls: true, preload: 'none', playsinline: true }));
       } else {
         wrap.append(el('div', { class: 'fn', html: I.music.replace('<svg', '<svg width="15" height="15"') + esc(att.name || 'audio') }),
-          el('audio', { src, controls: true, preload: 'metadata' }));
+          el('audio', { src, controls: true, preload: 'none' }));
       }
     };
-    if (att.url && /^https:\/\//.test(att.url)) build(att.url);
-    else if (att.fid) {
-      wrap.classList.add('loading'); wrap.textContent = 'Loading ' + att.kind + '…';
-      wrap._load = () => loadFile(att.fid).then(build).catch(() => { wrap.textContent = 'File unavailable'; });
-      if (lazyIO) lazyIO.observe(wrap); else wrap._load();
-    }
+    const external = att.url && /^https:\/\//.test(att.url) ? att.url : '';
+    if (!external && !att.fid) return wrap;
+    wrap.classList.add('loading');
+    wrap.textContent = 'Attachment is waiting to load…';
+    wrap._loaded = false;
+    wrap._load = () => {
+      if (wrap._loading || wrap._loaded || !wrap.isConnected) return;
+      wrap._loading = true;
+      const source = external ? Promise.resolve(external) : loadFile(att.fid);
+      source.then(src => {
+        if (wrap.isConnected && src) {
+          build(src);
+          wrap._loaded = true;
+          if (mediaIO) { mediaIO.unobserve(wrap); mediaIO.observe(wrap); }
+        } else if (wrap.isConnected) wrap.textContent = 'File unavailable';
+      })
+        .catch(() => { if (wrap.isConnected) wrap.textContent = 'File unavailable'; })
+        .finally(() => { wrap._loading = false; });
+    };
+    if (mediaIO) mediaIO.observe(wrap); else wrap._load();
     return wrap;
   }
   function attachmentsEl(list) {
@@ -972,10 +1194,23 @@
     if (!arr.length) return null;
     return el('div', { class: 'atts' }, arr.map(attachmentEl));
   }
+  function disposeAttachments(root) {
+    if (!root) return;
+    const wraps = [...(root.matches && root.matches('.att') ? [root] : []), ...root.querySelectorAll('.att')];
+    wraps.forEach(wrap => {
+      if (mediaIO) mediaIO.unobserve(wrap);
+      const media = wrap.querySelector('img,video,audio');
+      if (!media) return;
+      if (typeof media.pause === 'function') media.pause();
+      media.removeAttribute('src');
+      if (typeof media.load === 'function') media.load();
+      wrap._loaded = false;
+    });
+  }
   function deleteFiles(list) {
     const arr = Array.isArray(list) ? list : Object.values(list || {});
     arr.forEach(a => {
-      if (a && a.fid) db.ref('files/' + a.fid).remove().catch(() => {});
+      if (a && a.fid) { fileLoads.delete(a.fid); db.ref('files/' + a.fid).remove().catch(() => {}); }
       if (a && a.url && storage) { try { storage.refFromURL(a.url).delete().catch(() => {}); } catch (e) {} }
     });
   }
@@ -997,7 +1232,7 @@
     });
     if (allowAdd && keys.length) {
       const add = el('button', { class: 'react add', type: 'button', title: 'Add reaction', html: I.plus });
-      add.onclick = () => openPicker(add, id => toggleReaction(path, id), { title: 'React' });
+      add.onclick = () => openPicker(add, id => toggleReaction(path, id), { title: 'React', stickers: false });
       box.append(add);
     }
     return keys.length ? box : null;
@@ -1034,14 +1269,27 @@
       archiveBtn,
       deviceInfoBtn);
     // unread DMs: a conversation is unread when its last activity is newer than my last read
-    let uc = {}, rd = {};
+    let uc = {}, rd = {}, unreadState = {}, unreadCount = 0, unreadPaintQueued = false;
     const paintDot = () => {
-      const n = Object.keys(uc).filter(c => (uc[c] || 0) > (rd[c] || 0)).length;
-      dmDot.classList.toggle('hidden', !n);
-      emit('unread', { userConvs: uc, reads: rd, count: n });
+      unreadPaintQueued = false;
+      dmDot.classList.toggle('hidden', !unreadCount);
+      emit('unread', { userConvs: uc, reads: rd, count: unreadCount });
     };
-    db.ref('userConvs/' + uid).on('value', s => { uc = s.val() || {}; paintDot(); });
-    db.ref('reads/' + uid).on('value', s => { rd = s.val() || {}; paintDot(); });
+    const unreadRef = db.ref('userConvs/' + uid), readRef = db.ref('reads/' + uid);
+    const updateMapEntry = (target, snap, remove = false) => {
+      const key = snap.key, wasUnread = !!unreadState[key];
+      if (remove) delete target[snap.key]; else target[snap.key] = snap.val();
+      const isUnread = (uc[key] || 0) > (rd[key] || 0);
+      if (wasUnread !== isUnread) unreadCount += isUnread ? 1 : -1;
+      unreadState[key] = isUnread;
+      if (!unreadPaintQueued) { unreadPaintQueued = true; requestAnimationFrame(paintDot); }
+    };
+    unreadRef.on('child_added', s => updateMapEntry(uc, s));
+    unreadRef.on('child_changed', s => updateMapEntry(uc, s));
+    unreadRef.on('child_removed', s => updateMapEntry(uc, s, true));
+    readRef.on('child_added', s => updateMapEntry(rd, s));
+    readRef.on('child_changed', s => updateMapEntry(rd, s));
+    readRef.on('child_removed', s => updateMapEntry(rd, s, true));
 
     const profBtn = el('button', { class: 'corner-btn right', type: 'button', 'aria-label': 'Profile', title: 'Profile' });
     profBtn.onclick = () => openProfile({});
@@ -1366,22 +1614,27 @@
 
   function openMembers() {
     const list = el('div', { class: 'members-grid' });
+    const more = el('button', { type: 'button', class: 'btn sm members-more' }, 'Show more members');
     const search = el('input', { class: 'input', placeholder: 'Search members', style: 'margin-bottom:12px' });
+    let shown = 100;
     const render = () => {
       const q = search.value.trim().toLowerCase();
       const ids = Object.keys(S.users).filter(id => user(id) && (!q || user(id).name.toLowerCase().includes(q)))
         .sort((a, b) => (isOnline(b) - isOnline(a)) || (isOwner(b) - isOwner(a)) || (isAdmin(b) - isAdmin(a)) || user(a).name.localeCompare(user(b).name));
       list.innerHTML = '';
       if (!ids.length) list.append(el('div', { class: 'empty' }, 'No members yet'));
-      ids.forEach(id => list.append(el('button', { type: 'button', class: 'member-card', onclick: () => openUserCard(id) },
+      ids.slice(0, shown).forEach(id => list.append(el('button', { type: 'button', class: 'member-card', onclick: () => openUserCard(id) },
         avatar(id, 44, false),
         el('div', { class: 'member-card-copy' }, nameTag(id), el('div', { class: 'sub' }, isOnline(id) ? '● online' : 'offline')))));
+      more.classList.toggle('hidden', ids.length <= shown);
     };
-    search.oninput = render;
+    search.oninput = () => { shown = 100; render(); };
+    more.onclick = () => { shown += 100; render(); };
     const count = () => Object.keys(S.users).filter(id => user(id)).length;
-    const m = modal({ title: 'Members · ' + count() + ' · ' + onlineCount() + ' online', body: el('div', { class: 'members-content' }, search, list), wide: true, cls: 'members-modal', onClose: () => off() });
+    const m = modal({ title: 'Members · ' + count() + ' · ' + onlineCount() + ' online', body: el('div', { class: 'members-content' }, search, list, more), wide: true, cls: 'members-modal', onClose: cleanup });
     const update = () => { m.head.querySelector('h3').textContent = 'Members · ' + count() + ' · ' + onlineCount() + ' online'; render(); };
-    const off = (() => { const fn = () => update(); on('change', fn); return () => { handlers.change = handlers.change.filter(f => f !== fn); }; })();
+    function cleanup() { off('change', update); off('presence', update); }
+    on('change', update); on('presence', update);
     render();
   }
 
@@ -1410,10 +1663,12 @@
     async send(cid, msg, { silentSound = false } = {}) {
       const meta = (await db.ref('convs/' + cid).once('value')).val();
       if (!meta || !meta.members || !meta.members[uid]) throw new Error('You are not in this conversation');
+      const outgoing = { ...msg };
+      if (auth.currentUser) outgoing.authUid = auth.currentUser.uid;
       const ref = db.ref('convMsgs/' + cid).push();
-      const preview = (msg.text || (msg.attachments ? '📎 Attachment' : msg.share ? (msg.share.type === 'community' ? '🏘️ Shared a community' : msg.share.type === 'archive' ? '🗃️ Shared an Archive box' : '📝 Shared a post') : msg.forward ? '↪ Forwarded message' : '')).replace(/:gd\d+:/g, '🙂').slice(0, 120);
+      const preview = (outgoing.text || (outgoing.attachments ? '📎 Attachment' : outgoing.share ? (outgoing.share.type === 'community' ? '🏘️ Shared a community' : outgoing.share.type === 'archive' ? '🗃️ Shared an Archive box' : '📝 Shared a post') : outgoing.forward ? '↪ Forwarded message' : '')).replace(/:gd\d+:/g, '🙂').replace(/:sticker_[A-Za-z0-9_.-]{1,100}:/g, '[Sticker]').slice(0, 120);
       const upd = {};
-      upd['convMsgs/' + cid + '/' + ref.key] = msg;
+      upd['convMsgs/' + cid + '/' + ref.key] = outgoing;
       upd['convs/' + cid + '/last'] = { uid, text: preview, ts: TS };
       Object.keys(meta.members).forEach(m => { upd['userConvs/' + m + '/' + cid] = TS; });
       upd['reads/' + uid + '/' + cid] = TS;
@@ -1423,7 +1678,7 @@
     },
     markRead(cid) { return db.ref('reads/' + uid + '/' + cid).set(TS); },
     async listMine() {
-      const s = await db.ref('userConvs/' + uid).once('value');
+      const s = await db.ref('userConvs/' + uid).orderByValue().limitToLast(100).once('value');
       const ids = Object.keys(s.val() || {});
       const metas = await Promise.all(ids.map(c => db.ref('convs/' + c).once('value').then(x => [c, x.val()])));
       return metas.filter(([, m]) => m && m.members && m.members[uid])
@@ -1441,7 +1696,7 @@
     if (isOwner() && !ownerUnlocked()) { toast('Sign in to the owner panel before using owner actions', true); return false; }
     if (ownerOnly && !ownerUnlocked()) { toast('Owner only', true); return false; }
     if (!canModerate(target)) {
-      if (isAdmin() && !isOwner() && !firebaseAdminClaim && !(firebaseAdminLinked && firebaseAdminProfile === uid)) toast('Sign in with the Firebase account linked to this Orbit admin profile', true);
+      if (isAdmin() && !isOwner() && !(firebaseAdminLinked && firebaseAdminProfile === uid)) toast('Sign in with the Firebase account linked to this Orbit admin profile', true);
       else toast(isOwner(target) ? "You can't moderate the owner" : 'Not allowed', true);
       return false;
     }
@@ -1521,6 +1776,43 @@
         await db.ref().update(upd); toast('Profile deleted');
       } catch (e) { reportDbFailure('Delete profile', e); }
     },
+    async deleteUsers(ids, onProgress) {
+      if (!ownerUnlocked()) { toast('Owner only', true); return false; }
+      const targets = [...new Set(ids || [])].filter(id => id && id !== uid && !isOwner(id) && user(id));
+      if (!targets.length) { toast('Select at least one eligible profile', true); return false; }
+      if (targets.length > 100000) { toast('Delete up to 100,000 profiles at a time', true); return false; }
+      const ok = await confirmBox(
+        'Delete ' + targets.length.toLocaleString() + ' Orbit profile' + (targets.length === 1 ? '' : 's') + '? This runs in batches, so some may be deleted if a later batch fails. Messages and posts remain, and Firebase Authentication accounts are not deleted.',
+        'Delete selected profiles', true);
+      if (!ok) return null;
+      const deleted = [];
+      try {
+        const batchSize = 250;
+        for (let start = 0; start < targets.length; start += batchSize) {
+          const batch = targets.slice(start, start + batchSize);
+          const links = await Promise.all(batch.map(id => db.ref('adminAuthByProfile/' + id).once('value').then(s => [id, s.val()])));
+          const linkById = new Map(links);
+          const updates = {};
+          batch.forEach(id => {
+            const profile = user(id);
+            updates['users/' + id] = null;
+            updates['roles/' + id] = null;
+            if (profile) updates['names/' + nameKey(profile.name)] = null;
+            updates['adminAuthByProfile/' + id] = null;
+            const authUid = linkById.get(id);
+            if (authUid) updates['adminAuthUids/' + authUid] = null;
+          });
+          await db.ref().update(updates);
+          deleted.push(...batch);
+          if (onProgress) onProgress(deleted.length, targets.length);
+        }
+        toast('Deleted ' + deleted.length.toLocaleString() + ' profiles');
+      } catch (e) {
+        if (deleted.length) toast('Deleted ' + deleted.length.toLocaleString() + ' of ' + targets.length.toLocaleString() + ' profiles before an error: ' + e.message, true);
+        else reportDbFailure('Delete selected profiles', e);
+      }
+      return deleted;
+    },
     async editMessage(id, msg, base = 'messages') {
       if (!canManageContent(msg.uid)) return;
       const t = await promptText({ title: 'Edit message', value: msg.text || '' });
@@ -1529,6 +1821,11 @@
     },
     async deleteMessage(id, msg, skipConfirm, base = 'messages') {
       if (!canManageContent(msg.uid)) return;
+      const publicMessagePath = base === 'messages' || base.indexOf('channelMessages/') === 0 || base.indexOf('omegleRooms/') === 0;
+      if (publicMessagePath && msg.uid === uid && !msg.authUid && !canModerate(msg.uid)) {
+        toast('This older message has no secure owner record. An owner or admin can remove it.', true);
+        return;
+      }
       if (!skipConfirm && !(await confirmBox('Delete this message?', 'Delete', true))) return;
       try { await db.ref(base + '/' + id).remove(); deleteFiles(msg.attachments); } catch (e) { reportDbFailure('Delete message', e); }
     },
@@ -1752,6 +2049,8 @@
     function protectedTag() { return el('span', { class: 'sub' }, 'Protected'); }
 
     function usersTab() {
+      const pageSize = 100;
+      let page = 0;
       const search = el('input', { class: 'input', placeholder: 'Search users', style: 'margin-bottom:12px' });
       const filter = el('select', { class: 'select user-filter', 'aria-label': 'Filter users' }, [
         el('option', { value: 'all' }, 'All users'), el('option', { value: 'online' }, 'Online'),
@@ -1759,7 +2058,61 @@
         el('option', { value: 'members' }, 'Members'), el('option', { value: 'banned' }, 'Banned')
       ]);
       const list = el('div');
-      content.append(el('div', { class: 'user-filter-row' }, search, filter), list);
+      const selectedUsers = new Set();
+      const selectVisible = owner ? el('input', { type: 'checkbox', class: 'user-select', 'aria-label': 'Select all matching users' }) : null;
+      const selectedCount = owner ? el('span', { class: 'sub' }, '0 selected') : null;
+      const clearSelection = owner ? el('button', { class: 'btn sm', type: 'button', disabled: true }, 'Clear selection') : null;
+      const deleteSelected = owner ? el('button', { class: 'btn sm danger', type: 'button', disabled: true }, 'Delete selected profiles') : null;
+      const bulkBar = owner ? el('div', { class: 'bulk-users-row' },
+        el('label', { class: 'bulk-users-select' }, selectVisible, 'Select all matching users'),
+        selectedCount, clearSelection, deleteSelected) : null;
+      const pageInfo = el('span', { class: 'sub' }, '0 users');
+      const prevPage = el('button', { class: 'btn sm', type: 'button', disabled: true }, 'Previous');
+      const nextPage = el('button', { class: 'btn sm', type: 'button', disabled: true }, 'Next');
+      const pager = el('div', { class: 'user-list-pager' }, prevPage, pageInfo, nextPage);
+      content.append(el('div', { class: 'user-filter-row' }, search, filter), ...(owner ? [bulkBar] : []), pager, list);
+      let visibleEligible = [];
+      let deleting = false, deleteProgress = '';
+      const updateBulkBar = () => {
+        if (!owner) return;
+        for (const id of selectedUsers) if (!user(id) || id === uid || isOwner(id)) selectedUsers.delete(id);
+        const visibleSelected = visibleEligible.filter(id => selectedUsers.has(id)).length;
+        selectVisible.checked = visibleEligible.length > 0 && visibleSelected === visibleEligible.length;
+        selectVisible.indeterminate = visibleSelected > 0 && visibleSelected < visibleEligible.length;
+        selectedCount.textContent = deleting ? deleteProgress : selectedUsers.size.toLocaleString() + ' selected' + (selectedUsers.size > 100000 ? ' · limit 100,000' : '');
+        selectVisible.disabled = deleting;
+        clearSelection.disabled = deleting || selectedUsers.size === 0;
+        deleteSelected.disabled = deleting || selectedUsers.size === 0 || selectedUsers.size > 100000;
+        search.disabled = deleting; filter.disabled = deleting;
+        prevPage.disabled = deleting || page <= 0;
+        nextPage.disabled = deleting || page >= Math.max(1, Math.ceil(visibleEligible.length / pageSize)) - 1;
+        list.querySelectorAll('.user-select').forEach(input => { input.disabled = deleting; });
+      };
+      if (owner) {
+        selectVisible.onchange = () => {
+          visibleEligible.forEach(id => selectVisible.checked ? selectedUsers.add(id) : selectedUsers.delete(id));
+          render();
+        };
+        clearSelection.onclick = () => { selectedUsers.clear(); render(); };
+        deleteSelected.onclick = async () => {
+          deleting = true; deleteProgress = 'Starting deletion…'; updateBulkBar();
+          let done = null;
+          try {
+            done = await mod.deleteUsers([...selectedUsers], (count, total) => {
+              deleteProgress = 'Deleting ' + count.toLocaleString() + ' / ' + total.toLocaleString() + '…';
+              updateBulkBar();
+            });
+          } catch (e) { toast('Could not finish bulk deletion: ' + e.message, true); }
+          finally {
+            if (Array.isArray(done)) done.forEach(id => selectedUsers.delete(id));
+            deleting = false; deleteProgress = '';
+            updateBulkBar();
+            render();
+          }
+        };
+      }
+      prevPage.onclick = () => { if (page > 0) { page--; render(); } };
+      nextPage.onclick = () => { page++; render(); };
       const render = () => {
         const q = search.value.trim().toLowerCase();
         const ids = Object.keys(S.users).filter(id => {
@@ -1772,9 +2125,18 @@
           return true;
         })
           .sort((a, b) => (isOwner(b) - isOwner(a)) || (isAdmin(b) - isAdmin(a)) || user(a).name.localeCompare(user(b).name));
+        visibleEligible = owner ? ids.filter(id => id !== uid && !isOwner(id)) : [];
+        const pageCount = Math.max(1, Math.ceil(ids.length / pageSize));
+        page = Math.min(page, pageCount - 1);
+        const start = page * pageSize;
+        const pageIds = ids.slice(start, start + pageSize);
+        pageInfo.textContent = ids.length ? (start + 1).toLocaleString() + '–' + Math.min(start + pageSize, ids.length).toLocaleString() + ' of ' + ids.length.toLocaleString() : '0 users';
+        prevPage.disabled = page <= 0;
+        nextPage.disabled = page >= pageCount - 1;
+        pager.classList.toggle('hidden', ids.length <= pageSize);
         list.innerHTML = '';
         if (!ids.length) list.append(el('div', { class: 'empty' }, q || filter.value !== 'all' ? 'No users match this filter' : 'No users yet'));
-        ids.forEach(id => {
+        pageIds.forEach(id => {
           const acts = el('div', { class: 'acts' });
           const self = id === uid;
           if (!canModerate(id) || (self && !owner)) acts.append(protectedTag());
@@ -1793,17 +2155,31 @@
             acts.append(timeoutButton(id));
           }
           if (canModerate(id)) acts.append(el('button', { class: 'btn sm', onclick: () => openUserTags(id) }, 'Tags'));
-          list.append(el('div', { class: 'mrow' }, avatar(id, 34, false),
+          const checkbox = owner && id !== uid && !isOwner(id)
+            ? el('input', { type: 'checkbox', class: 'user-select', checked: selectedUsers.has(id), 'aria-label': 'Select ' + user(id).name,
+              onchange: e => { e.stopPropagation(); if (e.currentTarget.checked) selectedUsers.add(id); else selectedUsers.delete(id); updateBulkBar(); } })
+            : null;
+          list.append(el('div', { class: 'mrow' }, checkbox, avatar(id, 34, false),
             el('div', { class: 'grow' }, el('div', null, nameTag(id), ...statusTags(id)),
-              el('div', { class: 'sub' }, (isOnline(id) ? '● online' : 'offline') + (owner ? ' · ' + id : ''))),
+              el('div', { class: 'sub user-presence-status', 'data-user-id': id }, (isOnline(id) ? '● online' : 'offline') + (owner ? ' · ' + id : ''))),
             acts));
         });
+        updateBulkBar();
       };
-      search.oninput = render;
-      filter.onchange = render;
-      const fn = () => { if (document.activeElement && list.contains(document.activeElement)) return; render(); };
-      on('change', fn); detach.push(() => { handlers.change = handlers.change.filter(f => f !== fn); });
-      const tick = setInterval(render, 15000); detach.push(() => clearInterval(tick));
+      search.oninput = () => { page = 0; render(); };
+      filter.onchange = () => { page = 0; render(); };
+      const fn = () => { if (deleting || (document.activeElement && list.contains(document.activeElement))) return; render(); };
+      const presenceFn = () => {
+        if (deleting) return;
+        if (filter.value === 'online' || filter.value === 'offline') { render(); return; }
+        list.querySelectorAll('.user-presence-status[data-user-id]').forEach(node => {
+          const id = node.dataset.userId;
+          node.textContent = (isOnline(id) ? '● online' : 'offline') + (owner ? ' · ' + id : '');
+        });
+      };
+      on('change', fn); on('presence', presenceFn);
+      detach.push(() => { off('change', fn); off('presence', presenceFn); });
+      const tick = setInterval(() => { if (!deleting) render(); }, 15000); detach.push(() => clearInterval(tick));
       render();
     }
 
@@ -1974,8 +2350,8 @@
         preview.replaceChildren(avatarFrom(sender, 38), el('div', { class: 'announcement-copy' },
           el('div', { class: 'announcement-heading' }, name, el('span', { class: 'announcement-label' }, 'Announcement')), message));
       };
-      const insertEmoji = id => {
-        const token = ':gd' + id + ':';
+      const insertEmoji = (id, kind) => {
+        const token = emojiToken(id, kind);
         const start = textIn.selectionStart == null ? textIn.value.length : textIn.selectionStart;
         const end = textIn.selectionEnd == null ? start : textIn.selectionEnd;
         textIn.value = textIn.value.slice(0, start) + token + textIn.value.slice(end);
@@ -2135,7 +2511,17 @@
           el('button', {
             class: 'btn sm danger', onclick: async () => {
               if (!(await confirmBox('Delete every chat message? This cannot be undone.', 'Clear chat', true))) return;
-              try { await db.ref('messages').remove(); toast('Chat cleared'); }
+              try {
+                const snapshot = await db.ref('messages').once('value');
+                const ids = [];
+                snapshot.forEach(child => ids.push(child.key));
+                for (let start = 0; start < ids.length; start += 250) {
+                  const updates = {};
+                  ids.slice(start, start + 250).forEach(id => { updates['messages/' + id] = null; });
+                  await db.ref().update(updates);
+                }
+                toast('Chat cleared');
+              }
               catch (e) { reportDbFailure('Clear chat', e); }
             }
           }, 'Clear all chat')));
@@ -2152,7 +2538,7 @@
           const preview = (msg.text || '').trim() || (msg.attachments ? '[attachment]' : msg.share ? '[shared post]' : '');
           list.append(el('div', { class: 'mrow' }, avatar(msg.uid, 30, false),
             el('div', { class: 'grow' }, el('div', null, nameTag(msg.uid), el('span', { class: 'sub' }, ' · ' + clock(msg.ts || 0) + (msg.edited ? ' · edited' : ''))),
-              el('div', { class: 'txt', title: msg.text || '' }, preview)),
+              el('div', { class: 'txt', title: msg.text || '' }, richEl(preview, 'span'))),
             el('div', { class: 'acts' }, allowed ? [
               el('button', { class: 'btn sm', onclick: () => mod.editMessage(id, msg) }, 'Edit'),
               el('button', { class: 'btn sm danger', onclick: () => mod.deleteMessage(id, msg) }, 'Delete'),
@@ -2243,7 +2629,7 @@
         snap.forEach(c => {
           const cm = c.val();
           box.append(el('div', { class: 'mrow' }, avatar(cm.uid, 24, false),
-            el('div', { class: 'grow' }, nameTag(cm.uid), el('div', { class: 'txt' }, cm.text || '')),
+            el('div', { class: 'grow' }, nameTag(cm.uid), el('div', { class: 'txt' }, richEl(cm.text || ''))),
             el('div', { class: 'acts' }, canModerate(cm.uid) ? el('button', { class: 'btn sm danger', onclick: () => mod.deleteComment(postId, c.key, cm) }, 'Delete') : protectedTag())));
         });
       });
@@ -2264,14 +2650,15 @@
   window.Orbit = {
     db, TS, now, uid, S, I, el, esc, $, ls,
     on, off, emit, ready, init, dm, staffTag,
-    me, user, isOwner, isAdmin, ownerUnlocked, isBanned, timeoutLeft, isOnline, onlineCount, userByName, canModerate, canAct,
+    me, user, isOwner, isProtectedOwner, isAdmin, ownerUnlocked, isBanned, timeoutLeft, isOnline, onlineCount, userByName, canModerate, canAct,
+    authUid: () => auth.currentUser ? auth.currentUser.uid : null,
     canManageChatSettings, updateChatSettings,
     toast, modal, confirmBox, promptText, chooseDuration,
     messageTools, playMessageSound, notifyIncoming,
-    EMOJI_IDS, isEmoji, emojiUrl, emojiImg, openPicker, closePicker,
+    EMOJI_IDS, isEmoji, emojiUrl, emojiImg, STICKER_FILES, isSticker, stickerUrl, stickerImg, emojiToken, openPicker, closePicker,
     richEl, richHTML, mentionsMe,
     avatar, avatarFrom, nameTag, nameFrom, badges, userSig,
-    upload, kindOf, ACCEPT, attachmentEl, attachmentsEl, deleteFiles, fmtSize, fmtDur,
+    upload, kindOf, ACCEPT, attachmentEl, attachmentsEl, disposeAttachments, deleteFiles, fmtSize, fmtDur,
     reactionsEl, toggleReaction,
     openProfile, openUserCard, openMembers, openStaffPanel, mod, timeoutButton,
     timeAgo, clock

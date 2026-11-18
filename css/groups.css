@@ -73,3 +73,4 @@
 .community-modal .panel-head h3 { display: none; }
 .community-modal .panel-head .icon-btn { width: 36px; height: 36px; border-radius: 50%; background: #000b; color: #fff; }
 .community-modal .panel-head .icon-btn:hover { background: #000e; }
+.groups-load-more { display: block; margin: 22px auto 12px; }

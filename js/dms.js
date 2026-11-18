@@ -18,24 +18,35 @@
   let userConvs = {}, reads = {};
   let activeCid = null, convo = null;
 
-  db.ref('userConvs/' + uid).on('value', s => {
-    userConvs = s.val() || {};
-    Object.keys(userConvs).forEach(cid => {
-      if (metaRefs.has(cid)) return;
-      const ref = db.ref('convs/' + cid);
-      const cb = ref.on('value', ms => {
-        const m = ms.val();
-        if (m && m.members && m.members[uid]) metas.set(cid, m); else metas.delete(cid);
-        if (cid === activeCid) { if (!metas.has(cid)) closeConv('You are no longer in this chat'); else drawHead(); }
-        schedule();
-      });
-      metaRefs.set(cid, () => ref.off('value', cb));
+  function attachConversationMeta(cid) {
+    if (metaRefs.has(cid)) return;
+    const ref = db.ref('convs/' + cid);
+    const cb = ref.on('value', ms => {
+      const m = ms.val();
+      if (m && m.members && m.members[uid]) metas.set(cid, m); else metas.delete(cid);
+      if (cid === activeCid) { if (!metas.has(cid)) closeConv('You are no longer in this chat'); else drawHead(); }
+      schedule();
     });
-    for (const [cid, offFn] of metaRefs) if (!userConvs[cid]) { offFn(); metaRefs.delete(cid); metas.delete(cid); }
+    metaRefs.set(cid, () => ref.off('value', cb));
+  }
+  const userConvsRef = db.ref('userConvs/' + uid);
+  userConvsRef.on('child_added', s => {
+    userConvs[s.key] = s.val();
+    attachConversationMeta(s.key);
+    schedule();
+  });
+  userConvsRef.on('child_changed', s => { userConvs[s.key] = s.val(); schedule(); });
+  userConvsRef.on('child_removed', s => {
+    delete userConvs[s.key];
+    const stop = metaRefs.get(s.key);
+    if (stop) { stop(); metaRefs.delete(s.key); }
+    metas.delete(s.key);
+    if (activeCid === s.key) closeConv('Chat hidden — it comes back if they message you');
     schedule();
   });
   O.on('unread', d => { reads = d.reads || {}; schedule(); });
   O.on('change', () => { schedule(); if (activeCid) drawHead(); });
+  O.on('presence', schedule);
   sideSearch.addEventListener('input', () => schedule());
 
   let queued = false;
@@ -88,7 +99,7 @@
       .sort((a, b) => (O.isOnline(b) - O.isOnline(a)) || O.user(a).name.localeCompare(O.user(b).name));
     peopleList.innerHTML = '';
     if (!people.length) peopleList.append(el('div', { class: 'side-empty' }, q ? 'Nobody matches “' + sideSearch.value.trim() + '”' : 'No one else here yet'));
-    people.forEach(id => {
+    people.slice(0, 100).forEach(id => {
       const u = O.user(id);
       const row = el('button', { type: 'button', class: 'row' + (activeCid === O.dm.id(uid, id) ? ' on' : ''), onclick: () => openDM(id) },
         O.avatar(id, 40, false),
@@ -97,6 +108,7 @@
       if (O.isOnline(id)) row.append(el('span', { class: 'online' }));
       peopleList.append(row);
     });
+    if (people.length > 100) peopleList.append(el('div', { class: 'side-empty' }, 'Showing 100 of ' + people.length.toLocaleString() + ' people. Search to narrow the list.'));
   }
 
   async function openDM(other) {
@@ -230,9 +242,10 @@
       const ids = Object.keys(O.S.users).filter(id => id !== uid && O.user(id) && !existing.includes(id) && (!q || O.user(id).name.toLowerCase().includes(q)))
         .sort((a, b) => (O.isOnline(b) - O.isOnline(a)) || O.user(a).name.localeCompare(O.user(b).name));
       if (!ids.length) listEl.append(el('div', { class: 'side-empty' }, q ? 'Nobody matches' : 'No one to add'));
-      ids.forEach(id => listEl.append(el('button', { type: 'button', class: 'pick' + (chosen.has(id) ? ' on' : ''),
+      ids.slice(0, 100).forEach(id => listEl.append(el('button', { type: 'button', class: 'pick' + (chosen.has(id) ? ' on' : ''),
         onclick: () => { chosen.has(id) ? chosen.delete(id) : chosen.add(id); draw(); } },
         O.avatar(id, 32, false), el('div', { class: 'grow' }, O.nameTag(id)), el('span', { class: 'check' }))));
+      if (ids.length > 100) listEl.append(el('div', { class: 'side-empty' }, 'Showing 100 of ' + ids.length.toLocaleString() + ' people. Search to narrow the list.'));
       picked.innerHTML = '';
       chosen.forEach(id => picked.append(el('button', { type: 'button', class: 'chip on', title: 'Remove', onclick: () => { chosen.delete(id); draw(); } }, O.avatar(id, 20, false), O.user(id).name, ' ×')));
       go.disabled = !chosen.size;

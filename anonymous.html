@@ -42,7 +42,9 @@
   <script>
     Orbit.init({ page: 'chat', require: true });
     Orbit.$('#messageTools').replaceWith(Orbit.messageTools());
-    Orbit.on('change', () => { Orbit.$('#onlineCount').textContent = Orbit.onlineCount(); });
+    const updateOnlineCount = () => { Orbit.$('#onlineCount').textContent = Orbit.onlineCount(); };
+    Orbit.on('change', updateOnlineCount);
+    Orbit.on('presence', updateOnlineCount);
     Orbit.Conversation({
       mount: Orbit.$('#convo'),
       msgPath: 'channelMessages/anonymous',

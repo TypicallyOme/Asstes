@@ -60,3 +60,4 @@
 .archive-embed-switch { display: flex; gap: 8px; margin: 2px 0 8px; }
 .archive-embed-html { width: 100%; min-height: 180px; resize: vertical; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .archive-embed-hint { margin: -2px 0 12px; font-size: 12px; }
+.more-load-more { display: block; margin: 22px auto 12px; }

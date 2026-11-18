@@ -97,7 +97,7 @@
       anonymous: true,
       searchBtn: searchButton,
       onIncoming: (message, key) => {
-        const body = String(message.text || (message.attachments ? 'Sent an attachment' : 'Sent a message')).replace(/:gd\d{1,4}:/g, '🙂').slice(0, 180);
+        const body = String(message.text || (message.attachments ? 'Sent an attachment' : 'Sent a message')).replace(/:gd\d{1,4}:/g, '🙂').replace(/:sticker_[A-Za-z0-9_.-]{1,100}:/g, '[Sticker]').slice(0, 180);
         O.notifyIncoming({ id: 'omegle:' + room + ':' + key, title: 'Omegle stranger', body, href: 'omegle.html' });
       }
     });

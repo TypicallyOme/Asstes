@@ -8,6 +8,7 @@
   const empty = O.$('#moreEmpty');
   const searchInput = O.$('#archiveSearch');
   const sortSelect = O.$('#archiveSort');
+  const loadMore = O.$('#moreLoadMore');
   const addBtn = O.$('#addMoreCard');
   const viewer = O.$('#moreViewer');
   const viewerPanel = O.$('#moreViewerPanel');
@@ -17,11 +18,21 @@
   let cards = {};
   let currentCard = null;
   let pageOverflow = '';
-  const imageCache = new Map();
+  const imageLoads = new Map();
+  const cardIO = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      entry.target._imageVisible = entry.isIntersecting;
+      if (entry.isIntersecting) entry.target._loadImages && entry.target._loadImages();
+      else entry.target._unloadImages && entry.target._unloadImages();
+    });
+  }, { rootMargin: '400px 0px' }) : null;
 
   addBtn.onclick = () => openCardEditor();
-  searchInput.addEventListener('input', renderCards);
-  sortSelect.addEventListener('change', renderCards);
+  let displayLimit = 100;
+  const resetCardsView = () => { displayLimit = 100; renderCards(); };
+  searchInput.addEventListener('input', resetCardsView);
+  sortSelect.addEventListener('change', resetCardsView);
+  loadMore.onclick = () => { displayLimit += 100; renderCards(); };
   viewerClose.innerHTML = I.x;
   viewerClose.onclick = closeViewer;
   O.$('#moreRefresh').onclick = refreshViewer;
@@ -38,14 +49,24 @@
     openHashBox();
   });
 
-  db.ref('moreCards').on('value', snap => {
-    cards = snap.val() || {};
-    renderCards();
-    openHashBox();
-  }, err => {
+  let cardsRenderQueued = false;
+  const scheduleCardsRender = () => {
+    if (cardsRenderQueued) return;
+    cardsRenderQueued = true;
+    requestAnimationFrame(() => {
+      cardsRenderQueued = false;
+      renderCards();
+      openHashBox();
+    });
+  };
+  const cardsError = err => {
     console.error('Orbit: cannot read /moreCards', err);
     O.toast('Could not load Archive boxes', true);
-  });
+  };
+  const cardsRef = db.ref('moreCards');
+  cardsRef.on('child_added', snap => { cards[snap.key] = snap.val(); scheduleCardsRender(); }, cardsError);
+  cardsRef.on('child_changed', snap => { cards[snap.key] = snap.val(); scheduleCardsRender(); }, cardsError);
+  cardsRef.on('child_removed', snap => { delete cards[snap.key]; scheduleCardsRender(); }, cardsError);
 
   function webUrl(value) {
     let raw = String(value || '').trim();
@@ -66,17 +87,21 @@
     if (image.url) return Promise.resolve(webUrl(image.url) || '');
     if (!image.fid) return Promise.resolve('');
     const fid = String(image.fid);
-    if (!imageCache.has(fid)) {
-      imageCache.set(fid, db.ref('files/' + fid + '/data').once('value').then(s => {
+    if (!imageLoads.has(fid)) {
+      const request = db.ref('files/' + fid + '/data').once('value').then(s => {
         const data = s.val();
         return typeof data === 'string' && /^data:image\//i.test(data) ? data : '';
-      }).catch(() => ''));
+      }).catch(() => '');
+      imageLoads.set(fid, request);
+      const forget = () => { if (imageLoads.get(fid) === request) imageLoads.delete(fid); };
+      request.then(forget, forget);
     }
-    return imageCache.get(fid);
+    return imageLoads.get(fid);
   }
 
   function renderCards() {
     if (!grid) return;
+    if (cardIO) cardIO.disconnect();
     grid.innerHTML = '';
     const query = searchInput.value.trim().toLocaleLowerCase();
     const sortBy = sortSelect.value || 'newest';
@@ -90,11 +115,13 @@
     });
     empty.textContent = query ? 'No boxes match your search.' : 'No boxes yet.';
     empty.classList.toggle('hidden', items.length > 0);
-    items.forEach(([id, card]) => {
+    const visible = items.slice(0, displayLimit);
+    loadMore.classList.toggle('hidden', items.length <= displayLimit);
+    visible.forEach(([id, card]) => {
       const shell = el('article', { class: 'more-card-shell no-image' });
       shell.style.aspectRatio = '1 / 1';
       const image = el('img', { alt: '', loading: 'lazy', draggable: 'false' });
-      image.onerror = () => { image.remove(); shell.classList.add('no-image'); };
+      image.onerror = () => { image.removeAttribute('src'); shell.classList.add('no-image'); shell._imageLoaded = true; };
       const titleNode = O.richEl(String(card.title || 'Untitled').slice(0, 60), 'span');
       titleNode.classList.add('more-card-title');
       const descriptionNode = card.text ? O.richEl(String(card.text).slice(0, 180), 'span') : null;
@@ -112,16 +139,28 @@
       }
       shell.append(actions);
       grid.append(shell);
-      getImageSource(card.image).then(src => {
-        if (!shell.isConnected) return;
-        if (src) { image.src = src; shell.classList.remove('no-image'); }
-      });
+      shell._imageLoaded = false; shell._imageLoading = false;
+      shell._loadImages = () => {
+        if (shell._imageLoading || shell._imageLoaded || !shell.isConnected) return;
+        shell._imageLoading = true;
+        getImageSource(card.image).then(src => {
+          if (!shell.isConnected || !shell._imageVisible) return;
+          shell._imageLoaded = true;
+          if (src) { image.src = src; shell.classList.remove('no-image'); }
+        }).finally(() => { shell._imageLoading = false; });
+      };
+      shell._unloadImages = () => {
+        image.removeAttribute('src');
+        shell.classList.add('no-image');
+        shell._imageLoaded = false;
+      };
+      if (cardIO) cardIO.observe(shell); else { shell._imageVisible = true; shell._loadImages(); }
     });
   }
 
   function insertEmoji(input, button) {
-    O.openPicker(button, id => {
-      const token = ':gd' + id + ':';
+    O.openPicker(button, (id, kind) => {
+      const token = O.emojiToken(id, kind);
       const start = input.selectionStart == null ? input.value.length : input.selectionStart;
       const end = input.selectionEnd == null ? start : input.selectionEnd;
       input.value = input.value.slice(0, start) + token + input.value.slice(end);
@@ -312,9 +351,12 @@
     O.dm.listMine().then(list => { convs = list; draw(); }).catch(() => {});
     go.onclick = async () => {
       if (!O.canAct()) return;
+      const authUid = O.authUid();
+      if (dest.type === 'main' && !authUid) return O.toast('Secure chat sign-in is unavailable. Enable Anonymous sign-in in Firebase Authentication.', true);
       go.disabled = true;
       const share = { id, type: 'archive', uid: card.createdBy || O.uid, title: String(card.title || 'Untitled').slice(0, 60), text: String(card.text || '').slice(0, 180), url: webUrl(card.url) || '' };
       const msg = { uid: O.uid, text: note.value.trim().slice(0, 1000), ts: O.TS, share };
+      if (authUid) msg.authUid = authUid;
       try {
         let where = 'main chat';
         if (dest.type === 'main') await db.ref('messages').push(msg);

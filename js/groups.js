@@ -6,19 +6,30 @@
 
   const grid = O.$('#communityGrid');
   const empty = O.$('#communityEmpty');
+  const loadMore = O.$('#groupsLoadMore');
   const search = O.$('#communitySearch');
   const addButton = O.$('#addCommunity');
   const tabs = [...document.querySelectorAll('.groups-tab')];
   let communities = {};
   let mode = 'discover';
+  let displayLimit = 100;
   let openedHash = '';
   let orbitReady = false;
-  const imageCache = new Map();
+  const imageLoads = new Map();
+  const cardIO = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      entry.target._imageVisible = entry.isIntersecting;
+      if (entry.isIntersecting) entry.target._loadImages && entry.target._loadImages();
+      else entry.target._unloadImages && entry.target._unloadImages();
+    });
+  }, { rootMargin: '400px 0px' }) : null;
 
   addButton.onclick = () => openEditor();
-  search.addEventListener('input', render);
+  search.addEventListener('input', () => { displayLimit = 100; render(); });
+  loadMore.onclick = () => { displayLimit += 100; render(); };
   tabs.forEach(tab => tab.onclick = () => {
     mode = tab.dataset.mode;
+    displayLimit = 100;
     tabs.forEach(item => {
       const active = item === tab;
       item.classList.toggle('active', active);
@@ -27,14 +38,24 @@
     render();
   });
 
-  db.ref('communities').on('value', snap => {
-    communities = snap.val() || {};
-    render();
-    if (orbitReady) openHashCommunity();
-  }, err => {
+  let renderQueued = false;
+  const scheduleRender = () => {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => {
+      renderQueued = false;
+      render();
+      if (orbitReady) openHashCommunity();
+    });
+  };
+  const communityError = err => {
     console.error('Orbit: cannot load communities', err);
     O.toast('Could not load communities', true);
-  });
+  };
+  const communitiesRef = db.ref('communities');
+  communitiesRef.on('child_added', snap => { communities[snap.key] = snap.val(); scheduleRender(); }, communityError);
+  communitiesRef.on('child_changed', snap => { communities[snap.key] = snap.val(); scheduleRender(); }, communityError);
+  communitiesRef.on('child_removed', snap => { delete communities[snap.key]; scheduleRender(); }, communityError);
   O.ready.then(() => { orbitReady = true; render(); openHashCommunity(); });
   O.on('change', render);
 
@@ -54,10 +75,15 @@
     if (value.url) return Promise.resolve(safeUrl(value.url));
     if (!value.fid) return Promise.resolve('');
     const fid = String(value.fid);
-    if (!imageCache.has(fid)) imageCache.set(fid, db.ref('files/' + fid + '/data').once('value')
-      .then(s => typeof s.val() === 'string' && /^data:image\//i.test(s.val()) ? s.val() : '')
-      .catch(() => ''));
-    return imageCache.get(fid);
+    if (!imageLoads.has(fid)) {
+      const request = db.ref('files/' + fid + '/data').once('value')
+        .then(s => typeof s.val() === 'string' && /^data:image\//i.test(s.val()) ? s.val() : '')
+        .catch(() => '');
+      imageLoads.set(fid, request);
+      const forget = () => { if (imageLoads.get(fid) === request) imageLoads.delete(fid); };
+      request.then(forget, forget);
+    }
+    return imageLoads.get(fid);
   }
 
   const isMember = community => !!(community && community.members && community.members[uid]);
@@ -67,6 +93,7 @@
 
   function render() {
     if (!grid) return;
+    if (cardIO) cardIO.disconnect();
     grid.innerHTML = '';
     const query = search.value.trim().toLowerCase();
     const joinedCount = Object.values(communities).filter(isMember).length;
@@ -78,7 +105,8 @@
       .sort((a, b) => Number((b[1].last || {}).ts || b[1].createdAt || 0) - Number((a[1].last || {}).ts || a[1].createdAt || 0));
     empty.classList.toggle('hidden', items.length > 0);
     empty.textContent = mode === 'joined' ? 'You have not joined any communities yet.' : 'No communities found. Start one with Add Community.';
-    items.forEach(([id, community]) => grid.append(communityCard(id, community)));
+    loadMore.classList.toggle('hidden', items.length <= displayLimit);
+    items.slice(0, displayLimit).forEach(([id, community]) => grid.append(communityCard(id, community)));
   }
 
   function communityCard(id, community) {
@@ -88,12 +116,6 @@
     coverImage.onerror = () => coverImage.remove();
     cover.append(coverImage);
     const logo = el('div', { class: 'community-logo' }, initial(community));
-    getImageSource(community.cover).then(src => { if (src && cover.isConnected) coverImage.src = src; });
-    getImageSource(community.logo).then(src => {
-      if (!src || !logo.isConnected) return;
-      logo.innerHTML = '';
-      logo.append(el('img', { src, alt: '', loading: 'lazy' }));
-    });
     const title = O.richEl(String(community.name || 'Untitled community'), 'span');
     title.classList.add('community-card-title');
     const description = O.richEl(String(community.description || 'No description yet.').slice(0, 200), 'span');
@@ -103,7 +125,26 @@
         el('span', { class: 'member-dot' }), memberCount(community) + (memberCount(community) === 1 ? ' member' : ' members'),
         isMember(community) ? el('span', { class: 'member-joined' }, ' · Joined') : null));
     card.append(el('div', { class: 'community-art' }, cover, logo), copy);
+    card._imageLoaded = false; card._imageLoading = false;
+    card._loadImages = () => {
+      if (card._imageLoading || card._imageLoaded || !card.isConnected) return;
+      card._imageLoading = true;
+      Promise.all([getImageSource(community.cover), getImageSource(community.logo)]).then(([coverSrc, logoSrc]) => {
+        if (!card.isConnected || !card._imageVisible) return;
+        if (coverSrc) coverImage.src = coverSrc;
+        if (logoSrc) {
+          logo.replaceChildren(el('img', { src: logoSrc, alt: '', loading: 'lazy' }));
+        }
+        card._imageLoaded = true;
+      }).finally(() => { card._imageLoading = false; });
+    };
+    card._unloadImages = () => {
+      coverImage.removeAttribute('src');
+      logo.replaceChildren(document.createTextNode(initial(community)));
+      card._imageLoaded = false;
+    };
     card.onclick = () => openCommunity(id, community);
+    if (cardIO) cardIO.observe(card); else { card._imageVisible = true; card._loadImages(); }
     return card;
   }
 
@@ -210,10 +251,12 @@
         if (!src || !logo.isConnected) return;
         logo.innerHTML = ''; logo.append(el('img', { src, alt: '', loading: 'lazy' }));
       });
+      const communityTitle = O.richEl(community.name || 'Community', 'div');
+      communityTitle.classList.add('community-chat-title');
       const mount = el('div', { class: 'community-chat-mount' });
       const layout = el('div', { class: 'community-chat-layout' },
         el('div', { class: 'community-chat-banner' }, logo,
-          el('div', { class: 'grow' }, el('div', { class: 'community-chat-title' }, community.name || 'Community'),
+          el('div', { class: 'grow' }, communityTitle,
             el('div', { class: 'muted', style: 'font-size:12px' }, memberCount(community) + ' members')),
           el('button', { type: 'button', class: 'btn sm community-chat-back', onclick: () => {
             if (conversation) conversation.destroy(); conversation = null;
@@ -221,7 +264,7 @@
           } }, 'Community info')),
         mount);
       body.append(layout);
-      modal.head.querySelector('h3').textContent = (community.name || 'Community') + ' chat';
+      modal.head.querySelector('h3').innerHTML = O.richHTML((community.name || 'Community') + ' chat');
       const leave = el('button', { type: 'button', class: 'btn ghost', onclick: leaveCommunity }, 'Leave');
       if (community.owner !== uid) foot.append(leave);
       foot.append(el('button', { type: 'button', class: 'btn', onclick: () => shareCommunity(id, community) }, 'Share'),
@@ -237,7 +280,7 @@
           const member = await db.ref('communities/' + id + '/members/' + uid).once('value');
           if (!member.val()) throw new Error('Join this community to send messages');
           const ref = db.ref('communityMsgs/' + id).push();
-          const preview = String(message.text || (message.attachments ? '📎 Attachment' : message.share ? '📝 Shared item' : message.forward ? '↪ Forwarded message' : '')).replace(/:gd\d{1,4}:/g, '🙂').slice(0, 120);
+          const preview = String(message.text || (message.attachments ? '📎 Attachment' : message.share ? '📝 Shared item' : message.forward ? '↪ Forwarded message' : '')).replace(/:gd\d{1,4}:/g, '🙂').replace(/:sticker_[A-Za-z0-9_.-]{1,100}:/g, '[Sticker]').slice(0, 120);
           const update = {};
           update['communityMsgs/' + id + '/' + ref.key] = message;
           update['communities/' + id + '/last'] = { uid, text: preview, ts: O.TS };
@@ -256,7 +299,7 @@
     const note = el('textarea', { class: 'textarea', rows: 2, placeholder: 'Add a message (optional)', maxlength: 1000, style: 'min-height:60px' });
     const preview = el('div', { class: 'share-preview' },
       O.nameTag(community.owner || uid),
-      el('div', { class: 't-title', style: 'font-size:14px;margin-top:6px' }, community.name || 'Community'),
+      el('div', { class: 't-title', style: 'font-size:14px;margin-top:6px' }, O.richEl(community.name || 'Community', 'span')),
       community.description ? O.richEl(community.description) : el('div', { class: 'muted' }, 'Public Orbit community'));
     const search = el('input', { class: 'input', placeholder: 'Search chats or people' });
     const listEl = el('div', { class: 'pick-list' });
@@ -291,9 +334,12 @@
     O.dm.listMine().then(list => { convs = list; draw(); }).catch(() => {});
     send.onclick = async () => {
       if (!O.canAct()) return;
+      const authUid = O.authUid();
+      if (dest.type === 'main' && !authUid) return O.toast('Secure chat sign-in is unavailable. Enable Anonymous sign-in in Firebase Authentication.', true);
       send.disabled = true;
       const share = { id, type: 'community', uid: community.owner || uid, title: String(community.name || 'Community').slice(0, 100), text: String(community.description || '').slice(0, 500) };
       const message = { uid, text: note.value.trim().slice(0, 1000), ts: O.TS, share };
+      if (authUid) message.authUid = authUid;
       try {
         let where = 'main chat';
         if (dest.type === 'main') await db.ref('messages').push(message);
@@ -318,8 +364,8 @@
 
   function emojiButton(input) {
     const button = el('button', { type: 'button', class: 'icon-btn emoji-trigger', title: 'Add emoji', html: I.smile });
-    button.onclick = () => O.openPicker(button, id => {
-      const token = ':gd' + id + ':';
+    button.onclick = () => O.openPicker(button, (id, kind) => {
+      const token = O.emojiToken(id, kind);
       const start = input.selectionStart == null ? input.value.length : input.selectionStart;
       const end = input.selectionEnd == null ? start : input.selectionEnd;
       input.value = input.value.slice(0, start) + token + input.value.slice(end);
